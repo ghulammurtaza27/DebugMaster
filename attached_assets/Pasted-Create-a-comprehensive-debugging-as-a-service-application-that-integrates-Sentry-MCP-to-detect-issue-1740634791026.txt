@@ -1,0 +1,44 @@
+Create a comprehensive debugging-as-a-service application that integrates Sentry MCP to detect issues and GitHub MCP to automatically create pull requests with fixes. The application should have the following capabilities:
+
+1. Core Functionality:
+   - Use Sentry MCP to identify and analyze errors in applications
+   - Build deep context on the entire codebase to understand complex relationships between files
+   - Generate intelligent fixes for bugs, including complex ones requiring cross-file understanding
+   - Use GitHub MCP to create branches and pull requests with the fixes
+   - Include detailed explanations in PR descriptions about the bug and the approach to fixing it
+
+2. Advanced Context Building:
+   - Implement a knowledge graph of the codebase that maps dependencies between files
+   - Analyze import statements and function calls to understand code relationships
+   - Use Git MCP to analyze code history and patterns
+   - Build a sequential thinking process to break down complex bugs into manageable parts
+   - Include test files in the context to ensure fixes don't break existing functionality
+
+3. CI/CD Integration:
+   - Create GitHub Actions workflows to run the debugging service as a scheduled job
+   - Set up webhooks to trigger the process when new Sentry issues appear
+   - Implement rate limiting to avoid overwhelming API quotas
+   - Add monitoring to track success rates and performance
+   - Create a dashboard to visualize the state of automated bug fixes
+
+4. Monitoring and Analytics:
+   - Track metrics like issues processed, fixes attempted, fixes succeeded, and PRs created
+   - Calculate success rates and average processing times
+   - Log errors and edge cases for further improvement
+   - Generate regular summary reports of the service's performance
+
+5. Implementation Details:
+   - Provide complete code for all components including:
+     - Main debugging service script
+     - Rate limiter utility
+     - Monitoring module
+     - GitHub Actions workflow files
+     - Webhook handler
+     - Dashboard generator
+
+6. Security Considerations:
+   - Implement proper token handling for GitHub and Sentry APIs
+   - Ensure the system doesn't introduce new vulnerabilities
+   - Add validation for generated code before creating PRs
+
+The solution should be well-documented with clear explanations of how each component works and how they interact with each other. Include instructions for deployment and configuration.

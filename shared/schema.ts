@@ -2,6 +2,7 @@ import { pgTable, text, serial, integer, boolean, timestamp, jsonb } from "drizz
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+// Keep existing tables
 export const issues = pgTable("issues", {
   id: serial("id").primaryKey(),
   sentryId: text("sentry_id").notNull(),
@@ -32,6 +33,20 @@ export const metrics = pgTable("metrics", {
   date: timestamp("date").defaultNow(),
 });
 
+// Add settings table
+export const settings = pgTable("settings", {
+  id: serial("id").primaryKey(),
+  sentryDsn: text("sentry_dsn").notNull(),
+  sentryToken: text("sentry_token").notNull(),
+  sentryOrg: text("sentry_org").notNull(),
+  sentryProject: text("sentry_project").notNull(),
+  githubToken: text("github_token").notNull(),
+  githubOwner: text("github_owner").notNull(),
+  githubRepo: text("github_repo").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Keep existing schemas
 export const insertIssueSchema = createInsertSchema(issues).omit({ 
   id: true,
   createdAt: true 
@@ -47,9 +62,20 @@ export const insertMetricSchema = createInsertSchema(metrics).omit({
   date: true 
 });
 
+// Add settings schema
+export const insertSettingsSchema = createInsertSchema(settings).omit({
+  id: true,
+  updatedAt: true,
+});
+
+// Keep existing types
 export type Issue = typeof issues.$inferSelect;
 export type InsertIssue = z.infer<typeof insertIssueSchema>;
 export type Fix = typeof fixes.$inferSelect;
 export type InsertFix = z.infer<typeof insertFixSchema>;
 export type Metric = typeof metrics.$inferSelect;
 export type InsertMetric = z.infer<typeof insertMetricSchema>;
+
+// Add settings types
+export type Settings = typeof settings.$inferSelect;
+export type InsertSettings = z.infer<typeof insertSettingsSchema>;

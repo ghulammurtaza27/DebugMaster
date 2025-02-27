@@ -1,6 +1,6 @@
 import { db } from "./db";
-import { issues, fixes, metrics } from "@shared/schema";
-import { Issue, InsertIssue, Fix, InsertFix, Metric, InsertMetric } from "@shared/schema";
+import { issues, fixes, metrics, settings } from "@shared/schema";
+import { Issue, InsertIssue, Fix, InsertFix, Metric, InsertMetric, Settings, InsertSettings } from "@shared/schema";
 import { eq } from "drizzle-orm";
 
 export interface IStorage {
@@ -19,6 +19,10 @@ export interface IStorage {
   // Metrics
   getMetrics(): Promise<Metric[]>;
   createMetric(metric: InsertMetric): Promise<Metric>;
+
+  // Settings
+  getSettings(): Promise<Settings | undefined>;
+  saveSettings(settings: InsertSettings): Promise<Settings>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -80,6 +84,19 @@ export class DatabaseStorage implements IStorage {
   async createMetric(insertMetric: InsertMetric): Promise<Metric> {
     const [metric] = await db.insert(metrics).values(insertMetric).returning();
     return metric;
+  }
+
+  // Add settings methods
+  async getSettings(): Promise<Settings | undefined> {
+    const [setting] = await db.select().from(settings);
+    return setting;
+  }
+
+  async saveSettings(insertSettings: InsertSettings): Promise<Settings> {
+    // Delete existing settings first since we only want one row
+    await db.delete(settings);
+    const [setting] = await db.insert(settings).values(insertSettings).returning();
+    return setting;
   }
 }
 

@@ -2,13 +2,31 @@ import { pgTable, text, serial, integer, boolean, timestamp, jsonb } from "drizz
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-// Add users table at the top with existing tables
+// Add users table with subscription fields
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
   username: text("username").notNull().unique(),
   email: text("email").notNull().unique(),
   password: text("password").notNull(),
   role: text("role").notNull().default("user"),
+  stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  subscriptionStatus: text("subscription_status").default("inactive"),
+  subscriptionTier: text("subscription_tier").default("free"),
+  trialEndsAt: timestamp("trial_ends_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Add subscriptions table
+export const subscriptions = pgTable("subscriptions", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  stripeSubscriptionId: text("stripe_subscription_id").notNull(),
+  status: text("status").notNull(),
+  tier: text("tier").notNull(),
+  currentPeriodStart: timestamp("current_period_start").notNull(),
+  currentPeriodEnd: timestamp("current_period_end").notNull(),
+  cancelAtPeriodEnd: boolean("cancel_at_period_end").default(false),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -43,7 +61,6 @@ export const metrics = pgTable("metrics", {
   date: timestamp("date").defaultNow(),
 });
 
-// Add settings table
 export const settings = pgTable("settings", {
   id: serial("id").primaryKey(),
   sentryDsn: text("sentry_dsn").notNull(),
@@ -56,7 +73,6 @@ export const settings = pgTable("settings", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
-// Add after existing tables, before schemas
 export const codeNodes = pgTable("code_nodes", {
   id: serial("id").primaryKey(),
   path: text("path").notNull(),
@@ -75,7 +91,6 @@ export const codeEdges = pgTable("code_edges", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-// Keep existing schemas
 export const insertIssueSchema = createInsertSchema(issues).omit({
   id: true,
   createdAt: true,
@@ -91,24 +106,26 @@ export const insertMetricSchema = createInsertSchema(metrics).omit({
   date: true,
 });
 
-// Add settings schema
 export const insertSettingsSchema = createInsertSchema(settings).omit({
   id: true,
   updatedAt: true,
 });
 
-// Add user schemas after existing schemas
 export const insertUserSchema = createInsertSchema(users).omit({
   id: true,
   role: true,
   createdAt: true,
+  stripeCustomerId: true,
+  stripeSubscriptionId: true,
+  subscriptionStatus: true,
+  subscriptionTier: true,
+  trialEndsAt: true
 }).extend({
   password: z.string().min(8, "Password must be at least 8 characters"),
   email: z.string().email("Invalid email address"),
   username: z.string().min(3, "Username must be at least 3 characters"),
 });
 
-// Add after existing schemas
 export const insertNodeSchema = createInsertSchema(codeNodes).omit({
   id: true,
   createdAt: true,
@@ -119,7 +136,11 @@ export const insertEdgeSchema = createInsertSchema(codeEdges).omit({
   createdAt: true,
 });
 
-// Keep existing types
+export const insertSubscriptionSchema = createInsertSchema(subscriptions).omit({
+  id: true,
+  createdAt: true,
+});
+
 export type Issue = typeof issues.$inferSelect;
 export type InsertIssue = z.infer<typeof insertIssueSchema>;
 export type Fix = typeof fixes.$inferSelect;
@@ -127,16 +148,16 @@ export type InsertFix = z.infer<typeof insertFixSchema>;
 export type Metric = typeof metrics.$inferSelect;
 export type InsertMetric = z.infer<typeof insertMetricSchema>;
 
-// Add settings types
 export type Settings = typeof settings.$inferSelect;
 export type InsertSettings = z.infer<typeof insertSettingsSchema>;
 
-// Add user types after existing types
 export type User = typeof users.$inferSelect;
 export type InsertUser = z.infer<typeof insertUserSchema>;
 
-// Add after existing types
 export type CodeNode = typeof codeNodes.$inferSelect;
 export type InsertCodeNode = z.infer<typeof insertNodeSchema>;
 export type CodeEdge = typeof codeEdges.$inferSelect;
 export type InsertCodeEdge = z.infer<typeof insertEdgeSchema>;
+
+export type Subscription = typeof subscriptions.$inferSelect;
+export type InsertSubscription = z.infer<typeof insertSubscriptionSchema>;

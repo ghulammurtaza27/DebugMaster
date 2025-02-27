@@ -1,6 +1,13 @@
 import { db } from "./db";
-import { issues, fixes, metrics, settings } from "@shared/schema";
-import { Issue, InsertIssue, Fix, InsertFix, Metric, InsertMetric, Settings, InsertSettings } from "@shared/schema";
+import { issues, fixes, metrics, settings, codeNodes, codeEdges } from "@shared/schema";
+import { 
+  Issue, InsertIssue, 
+  Fix, InsertFix, 
+  Metric, InsertMetric, 
+  Settings, InsertSettings,
+  CodeNode, InsertCodeNode,
+  CodeEdge, InsertCodeEdge
+} from "@shared/schema";
 import { eq } from "drizzle-orm";
 
 export interface IStorage {

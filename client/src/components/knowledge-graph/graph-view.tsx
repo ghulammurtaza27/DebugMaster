@@ -5,16 +5,29 @@ import ReactFlow, {
   Controls,
   Background,
   useNodesState,
-  useEdgesState
+  useEdgesState,
+  NodeTypes
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { useQuery } from '@tanstack/react-query';
 import { CodeNode, CodeEdge } from '@shared/schema';
 
-const nodeTypes = {
-  file: { style: { background: '#e6f3ff' } },
-  function: { style: { background: '#f3ffe6' } },
-  class: { style: { background: '#ffe6e6' } }
+const nodeTypes: NodeTypes = {
+  file: ({ data }) => (
+    <div style={{ background: '#e6f3ff', padding: '10px', borderRadius: '4px' }}>
+      {data.label}
+    </div>
+  ),
+  function: ({ data }) => (
+    <div style={{ background: '#f3ffe6', padding: '10px', borderRadius: '4px' }}>
+      {data.label}
+    </div>
+  ),
+  class: ({ data }) => (
+    <div style={{ background: '#ffe6e6', padding: '10px', borderRadius: '4px' }}>
+      {data.label}
+    </div>
+  )
 };
 
 export default function GraphView() {

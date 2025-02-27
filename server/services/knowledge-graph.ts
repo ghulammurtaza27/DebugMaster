@@ -8,7 +8,7 @@ import path from "path";
 export class KnowledgeGraphService {
   async analyzeFile(filePath: string): Promise<void> {
     const content = await fs.readFile(filePath, 'utf-8');
-    
+
     // Create node for the file
     const fileNode = await storage.createCodeNode({
       path: filePath,
@@ -38,7 +38,7 @@ export class KnowledgeGraphService {
           name: path.basename(importPath),
           content: ''
         });
-        
+
         // Create import edge
         await storage.createCodeEdge({
           sourceId: fileNode.id,
@@ -66,9 +66,9 @@ export class KnowledgeGraphService {
       CallExpression: async (path) => {
         if (path.node.callee.type === 'Identifier') {
           const calleeName = path.node.callee.name;
-          const callerId = nodes.get(path.scope.block.id?.name || '');
+          const callerId = nodes.get(path.scope.path.node.id?.name || '');
           const calleeId = nodes.get(calleeName);
-          
+
           if (callerId && calleeId) {
             // Create call edge
             await storage.createCodeEdge({

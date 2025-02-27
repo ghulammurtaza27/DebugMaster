@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { cn } from "@/lib/utils";
-import { LayoutDashboard, AlertCircle, Settings, Network } from "lucide-react";
+import { LayoutDashboard, AlertCircle, Settings, Network, CreditCard } from "lucide-react";
 
 export default function Sidebar() {
   const [location] = useLocation();
@@ -9,6 +9,7 @@ export default function Sidebar() {
     { href: "/", label: "Dashboard", icon: LayoutDashboard },
     { href: "/issues", label: "Issues", icon: AlertCircle },
     { href: "/knowledge-graph", label: "Knowledge Graph", icon: Network },
+    { href: "/pricing", label: "Pricing", icon: CreditCard },
     { href: "/settings", label: "Settings", icon: Settings },
   ];
 

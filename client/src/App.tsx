@@ -12,6 +12,7 @@ import NotFound from "@/pages/not-found";
 import Sidebar from "@/components/layout/sidebar";
 import KnowledgeGraph from "@/pages/knowledge-graph";
 import Auth from "@/pages/auth";
+import Pricing from "@/pages/pricing";
 
 function Router() {
   return (
@@ -20,6 +21,7 @@ function Router() {
       <main className="flex-1 overflow-auto">
         <Switch>
           <Route path="/auth" component={Auth} />
+          <Route path="/pricing" component={Pricing} />
           <ProtectedRoute path="/" component={Dashboard} />
           <ProtectedRoute path="/issues" component={Issues} />
           <ProtectedRoute path="/issues/:id" component={IssueDetail} />

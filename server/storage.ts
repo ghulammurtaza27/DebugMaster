@@ -1,4 +1,7 @@
+import { db } from "./db";
+import { issues, fixes, metrics } from "@shared/schema";
 import { Issue, InsertIssue, Fix, InsertFix, Metric, InsertMetric } from "@shared/schema";
+import { eq } from "drizzle-orm";
 
 export interface IStorage {
   // Issues
@@ -18,93 +21,66 @@ export interface IStorage {
   createMetric(metric: InsertMetric): Promise<Metric>;
 }
 
-export class MemStorage implements IStorage {
-  private issues: Map<number, Issue>;
-  private fixes: Map<number, Fix>;
-  private metrics: Map<number, Metric>;
-  private currentIds: { [key: string]: number };
-
-  constructor() {
-    this.issues = new Map();
-    this.fixes = new Map();
-    this.metrics = new Map();
-    this.currentIds = { issues: 1, fixes: 1, metrics: 1 };
-  }
-
+export class DatabaseStorage implements IStorage {
   // Issues
   async getIssue(id: number): Promise<Issue | undefined> {
-    return this.issues.get(id);
+    const [issue] = await db.select().from(issues).where(eq(issues.id, id));
+    return issue;
   }
 
   async getIssues(): Promise<Issue[]> {
-    return Array.from(this.issues.values());
+    return await db.select().from(issues);
   }
 
   async createIssue(insertIssue: InsertIssue): Promise<Issue> {
-    const id = this.currentIds.issues++;
-    const issue: Issue = { 
-      ...insertIssue, 
-      id,
-      createdAt: new Date()
-    };
-    this.issues.set(id, issue);
+    const [issue] = await db.insert(issues).values(insertIssue).returning();
     return issue;
   }
 
   async updateIssueStatus(id: number, status: string): Promise<Issue> {
-    const issue = await this.getIssue(id);
+    const [issue] = await db
+      .update(issues)
+      .set({ status })
+      .where(eq(issues.id, id))
+      .returning();
     if (!issue) throw new Error("Issue not found");
-    
-    const updated = { ...issue, status };
-    this.issues.set(id, updated);
-    return updated;
+    return issue;
   }
 
   // Fixes
   async getFix(id: number): Promise<Fix | undefined> {
-    return this.fixes.get(id);
+    const [fix] = await db.select().from(fixes).where(eq(fixes.id, id));
+    return fix;
   }
 
   async getFixesByIssue(issueId: number): Promise<Fix[]> {
-    return Array.from(this.fixes.values())
-      .filter(fix => fix.issueId === issueId);
+    return await db.select().from(fixes).where(eq(fixes.issueId, issueId));
   }
 
   async createFix(insertFix: InsertFix): Promise<Fix> {
-    const id = this.currentIds.fixes++;
-    const fix: Fix = {
-      ...insertFix,
-      id,
-      createdAt: new Date()
-    };
-    this.fixes.set(id, fix);
+    const [fix] = await db.insert(fixes).values(insertFix).returning();
     return fix;
   }
 
   async updateFixStatus(id: number, status: string): Promise<Fix> {
-    const fix = await this.getFix(id);
+    const [fix] = await db
+      .update(fixes)
+      .set({ status })
+      .where(eq(fixes.id, id))
+      .returning();
     if (!fix) throw new Error("Fix not found");
-    
-    const updated = { ...fix, status };
-    this.fixes.set(id, updated);
-    return updated;
+    return fix;
   }
 
   // Metrics
   async getMetrics(): Promise<Metric[]> {
-    return Array.from(this.metrics.values());
+    return await db.select().from(metrics);
   }
 
   async createMetric(insertMetric: InsertMetric): Promise<Metric> {
-    const id = this.currentIds.metrics++;
-    const metric: Metric = {
-      ...insertMetric,
-      id,
-      date: new Date()
-    };
-    this.metrics.set(id, metric);
+    const [metric] = await db.insert(metrics).values(insertMetric).returning();
     return metric;
   }
 }
 
-export const storage = new MemStorage();
+export const storage = new DatabaseStorage();

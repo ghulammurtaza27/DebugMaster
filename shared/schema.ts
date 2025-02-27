@@ -2,6 +2,16 @@ import { pgTable, text, serial, integer, boolean, timestamp, jsonb } from "drizz
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+// Add users table at the top with existing tables
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  username: text("username").notNull().unique(),
+  email: text("email").notNull().unique(),
+  password: text("password").notNull(),
+  role: text("role").notNull().default("user"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 // Keep existing tables
 export const issues = pgTable("issues", {
   id: serial("id").primaryKey(),
@@ -87,6 +97,17 @@ export const insertSettingsSchema = createInsertSchema(settings).omit({
   updatedAt: true,
 });
 
+// Add user schemas after existing schemas
+export const insertUserSchema = createInsertSchema(users).omit({
+  id: true,
+  role: true,
+  createdAt: true,
+}).extend({
+  password: z.string().min(8, "Password must be at least 8 characters"),
+  email: z.string().email("Invalid email address"),
+  username: z.string().min(3, "Username must be at least 3 characters"),
+});
+
 // Add after existing schemas
 export const insertNodeSchema = createInsertSchema(codeNodes).omit({
   id: true,
@@ -109,6 +130,10 @@ export type InsertMetric = z.infer<typeof insertMetricSchema>;
 // Add settings types
 export type Settings = typeof settings.$inferSelect;
 export type InsertSettings = z.infer<typeof insertSettingsSchema>;
+
+// Add user types after existing types
+export type User = typeof users.$inferSelect;
+export type InsertUser = z.infer<typeof insertUserSchema>;
 
 // Add after existing types
 export type CodeNode = typeof codeNodes.$inferSelect;

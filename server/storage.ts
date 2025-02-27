@@ -1,12 +1,13 @@
 import { db } from "./db";
-import { issues, fixes, metrics, settings, codeNodes, codeEdges } from "@shared/schema";
+import { issues, fixes, metrics, settings, codeNodes, codeEdges, users } from "@shared/schema";
 import { 
   Issue, InsertIssue, 
   Fix, InsertFix, 
   Metric, InsertMetric, 
   Settings, InsertSettings,
   CodeNode, InsertCodeNode,
-  CodeEdge, InsertCodeEdge
+  CodeEdge, InsertCodeEdge,
+  User, InsertUser
 } from "@shared/schema";
 import { eq } from "drizzle-orm";
 
@@ -37,6 +38,11 @@ export interface IStorage {
   getCodeNodes(): Promise<CodeNode[]>;
   createCodeEdge(edge: InsertCodeEdge): Promise<CodeEdge>;
   getCodeEdges(): Promise<CodeEdge[]>;
+
+  // Users
+  getUser(id: number): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
+  createUser(user: InsertUser): Promise<User>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -100,14 +106,13 @@ export class DatabaseStorage implements IStorage {
     return metric;
   }
 
-  // Add settings methods
+  // Settings
   async getSettings(): Promise<Settings | undefined> {
     const [setting] = await db.select().from(settings);
     return setting;
   }
 
   async saveSettings(insertSettings: InsertSettings): Promise<Settings> {
-    // Delete existing settings first since we only want one row
     await db.delete(settings);
     const [setting] = await db.insert(settings).values(insertSettings).returning();
     return setting;
@@ -135,6 +140,22 @@ export class DatabaseStorage implements IStorage {
 
   async getCodeEdges(): Promise<CodeEdge[]> {
     return await db.select().from(codeEdges);
+  }
+
+  // Users
+  async getUser(id: number): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user;
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.username, username));
+    return user;
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const [user] = await db.insert(users).values(insertUser).returning();
+    return user;
   }
 }
 

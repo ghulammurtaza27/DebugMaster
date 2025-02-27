@@ -46,26 +46,56 @@ export const settings = pgTable("settings", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
+// Add after existing tables, before schemas
+export const codeNodes = pgTable("code_nodes", {
+  id: serial("id").primaryKey(),
+  path: text("path").notNull(),
+  type: text("type").notNull(), // file, function, class
+  name: text("name").notNull(),
+  content: text("content").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const codeEdges = pgTable("code_edges", {
+  id: serial("id").primaryKey(),
+  sourceId: integer("source_id").notNull().references(() => codeNodes.id),
+  targetId: integer("target_id").notNull().references(() => codeNodes.id),
+  type: text("type").notNull(), // imports, calls, extends
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 // Keep existing schemas
-export const insertIssueSchema = createInsertSchema(issues).omit({ 
+export const insertIssueSchema = createInsertSchema(issues).omit({
   id: true,
-  createdAt: true 
+  createdAt: true,
 });
 
-export const insertFixSchema = createInsertSchema(fixes).omit({ 
+export const insertFixSchema = createInsertSchema(fixes).omit({
   id: true,
-  createdAt: true 
+  createdAt: true,
 });
 
-export const insertMetricSchema = createInsertSchema(metrics).omit({ 
+export const insertMetricSchema = createInsertSchema(metrics).omit({
   id: true,
-  date: true 
+  date: true,
 });
 
 // Add settings schema
 export const insertSettingsSchema = createInsertSchema(settings).omit({
   id: true,
   updatedAt: true,
+});
+
+// Add after existing schemas
+export const insertNodeSchema = createInsertSchema(codeNodes).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertEdgeSchema = createInsertSchema(codeEdges).omit({
+  id: true,
+  createdAt: true,
 });
 
 // Keep existing types
@@ -79,3 +109,9 @@ export type InsertMetric = z.infer<typeof insertMetricSchema>;
 // Add settings types
 export type Settings = typeof settings.$inferSelect;
 export type InsertSettings = z.infer<typeof insertSettingsSchema>;
+
+// Add after existing types
+export type CodeNode = typeof codeNodes.$inferSelect;
+export type InsertCodeNode = z.infer<typeof insertNodeSchema>;
+export type CodeEdge = typeof codeEdges.$inferSelect;
+export type InsertCodeEdge = z.infer<typeof insertEdgeSchema>;

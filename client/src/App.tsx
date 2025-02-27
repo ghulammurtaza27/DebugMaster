@@ -8,6 +8,7 @@ import IssueDetail from "@/pages/issue-detail";
 import Settings from "@/pages/settings";
 import NotFound from "@/pages/not-found";
 import Sidebar from "@/components/layout/sidebar";
+import KnowledgeGraph from "@/pages/knowledge-graph";
 
 function Router() {
   return (
@@ -19,6 +20,7 @@ function Router() {
           <Route path="/issues" component={Issues} />
           <Route path="/issues/:id" component={IssueDetail} />
           <Route path="/settings" component={Settings} />
+          <Route path="/knowledge-graph" component={KnowledgeGraph} />
           <Route component={NotFound} />
         </Switch>
       </main>

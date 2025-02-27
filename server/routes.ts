@@ -6,6 +6,8 @@ import { githubService } from "./services/github";
 import { rateLimiter } from "./services/rate-limiter";
 import { insertIssueSchema, insertFixSchema, insertMetricSchema, insertSettingsSchema } from "@shared/schema";
 import { issueAnalyzer } from "./services/issue-analyzer";
+import { knowledgeGraph } from "./services/knowledge-graph"; // Assuming this is where knowledgeGraph is defined
+
 
 export async function registerRoutes(app: Express) {
   // Issues
@@ -129,6 +131,26 @@ export async function registerRoutes(app: Express) {
 
       const fix = await issueAnalyzer.analyzeIssue(issue);
       res.json(fix);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Knowledge Graph routes
+  app.get("/api/knowledge-graph/nodes", async (req, res) => {
+    const nodes = await storage.getCodeNodes();
+    res.json(nodes);
+  });
+
+  app.get("/api/knowledge-graph/edges", async (req, res) => {
+    const edges = await storage.getCodeEdges();
+    res.json(edges);
+  });
+
+  app.post("/api/knowledge-graph/analyze", async (req, res) => {
+    try {
+      await knowledgeGraph.buildProjectGraph("./");
+      res.json({ message: "Analysis complete" });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }

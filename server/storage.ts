@@ -23,6 +23,13 @@ export interface IStorage {
   // Settings
   getSettings(): Promise<Settings | undefined>;
   saveSettings(settings: InsertSettings): Promise<Settings>;
+
+  // Knowledge Graph
+  createCodeNode(node: InsertCodeNode): Promise<CodeNode>;
+  getCodeNode(id: number): Promise<CodeNode | undefined>;
+  getCodeNodes(): Promise<CodeNode[]>;
+  createCodeEdge(edge: InsertCodeEdge): Promise<CodeEdge>;
+  getCodeEdges(): Promise<CodeEdge[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -97,6 +104,30 @@ export class DatabaseStorage implements IStorage {
     await db.delete(settings);
     const [setting] = await db.insert(settings).values(insertSettings).returning();
     return setting;
+  }
+
+  // Knowledge Graph
+  async createCodeNode(insertNode: InsertCodeNode): Promise<CodeNode> {
+    const [node] = await db.insert(codeNodes).values(insertNode).returning();
+    return node;
+  }
+
+  async getCodeNode(id: number): Promise<CodeNode | undefined> {
+    const [node] = await db.select().from(codeNodes).where(eq(codeNodes.id, id));
+    return node;
+  }
+
+  async getCodeNodes(): Promise<CodeNode[]> {
+    return await db.select().from(codeNodes);
+  }
+
+  async createCodeEdge(insertEdge: InsertCodeEdge): Promise<CodeEdge> {
+    const [edge] = await db.insert(codeEdges).values(insertEdge).returning();
+    return edge;
+  }
+
+  async getCodeEdges(): Promise<CodeEdge[]> {
+    return await db.select().from(codeEdges);
   }
 }
 

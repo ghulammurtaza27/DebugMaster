@@ -56,7 +56,11 @@ export default function Issues() {
           </TableHeader>
           <TableBody>
             {issues?.map((issue) => (
-              <TableRow key={issue.id}>
+              <TableRow
+                key={issue.id}
+                className="cursor-pointer hover:bg-muted/50"
+                onClick={() => window.location.href = `/issues/${issue.id}`}
+              >
                 <TableCell>{issue.sentryId}</TableCell>
                 <TableCell>{issue.title}</TableCell>
                 <TableCell>

@@ -5,6 +5,7 @@ import { sentryService } from "./services/sentry";
 import { githubService } from "./services/github";
 import { rateLimiter } from "./services/rate-limiter";
 import { insertIssueSchema, insertFixSchema, insertMetricSchema, insertSettingsSchema } from "@shared/schema";
+import { issueAnalyzer } from "./services/issue-analyzer";
 
 export async function registerRoutes(app: Express) {
   // Issues
@@ -95,10 +96,41 @@ export async function registerRoutes(app: Express) {
         context: details.context
       });
 
+      // Process the issue asynchronously
+      issueAnalyzer.analyzeIssue(issue).catch(error => {
+        console.error("Error processing issue:", error);
+      });
+
+      // Update metrics
+      const metrics = await storage.getMetrics();
+      const latestMetric = metrics[metrics.length - 1];
+
+      await storage.createMetric({
+        issuesProcessed: (latestMetric?.issuesProcessed || 0) + 1,
+        fixesAttempted: (latestMetric?.fixesAttempted || 0) + 1,
+        fixesSucceeded: latestMetric?.fixesSucceeded || 0,
+        avgProcessingTime: latestMetric?.avgProcessingTime || 0
+      });
+
       res.json(issue);
     } catch (error) {
       console.error("Error processing Sentry webhook:", error);
       res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  // Add endpoint to manually trigger analysis
+  app.post("/api/issues/:id/analyze", async (req, res) => {
+    try {
+      const issue = await storage.getIssue(parseInt(req.params.id));
+      if (!issue) {
+        return res.status(404).json({ message: "Issue not found" });
+      }
+
+      const fix = await issueAnalyzer.analyzeIssue(issue);
+      res.json(fix);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
     }
   });
 

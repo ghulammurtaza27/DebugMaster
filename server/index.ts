@@ -8,6 +8,8 @@ import * as dotenv from 'dotenv';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { GitHubService } from "./services/github";
+import knowledgeGraphRouter from './api/knowledge-graph';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,6 +35,27 @@ app.use(express.urlencoded({ extended: false }));
 
 // Add setupAuth before routes
 setupAuth(app);
+
+// Add GitHub routes here, before the logging middleware
+const githubService = new GitHubService();
+app.post("/api/issues/github", async (req, res) => {
+  try {
+    const { issueUrl } = req.body;
+
+    if (!issueUrl) {
+      return res.status(400).json({ error: "Issue URL is required" });
+    }
+
+    const issue = await githubService.processIssueFromUrl(issueUrl);
+    return res.json(issue);
+  } catch (error) {
+    console.error("Error processing GitHub issue:", error);
+    return res.status(500).json({ error: "Failed to process GitHub issue" });
+  }
+});
+
+// Add routes
+app.use('/api/knowledge-graph', knowledgeGraphRouter);
 
 app.use((req, res, next) => {
   const start = Date.now();

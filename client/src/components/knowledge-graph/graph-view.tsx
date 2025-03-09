@@ -1,85 +1,154 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
 import ReactFlow, {
-  Node,
-  Edge,
+  MiniMap,
   Controls,
   Background,
   useNodesState,
   useEdgesState,
-  NodeTypes
+  Node,
+  Edge,
+  MarkerType,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { useQuery } from '@tanstack/react-query';
-import { CodeNode, CodeEdge } from '@shared/schema';
+import { apiRequest } from '@/lib/queryClient';
 
-const nodeTypes: NodeTypes = {
-  file: ({ data }) => (
-    <div style={{ background: '#e6f3ff', padding: '10px', borderRadius: '4px' }}>
-      {data.label}
-    </div>
-  ),
-  function: ({ data }) => (
-    <div style={{ background: '#f3ffe6', padding: '10px', borderRadius: '4px' }}>
-      {data.label}
-    </div>
-  ),
-  class: ({ data }) => (
-    <div style={{ background: '#ffe6e6', padding: '10px', borderRadius: '4px' }}>
-      {data.label}
-    </div>
-  )
+interface GraphNode extends Node {
+  type: 'file' | 'function' | 'class';
+  data: {
+    name: string;
+    content?: string;
+    type: string;
+  };
+}
+
+interface GraphEdge extends Edge {
+  type: string;
+  data?: {
+    relationship: string;
+  };
+}
+
+interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+const nodeTypes = {
+  file: { style: { background: '#6366f1', color: 'white' } },
+  function: { style: { background: '#8b5cf6', color: 'white' } },
+  class: { style: { background: '#ec4899', color: 'white' } },
 };
 
 export default function GraphView() {
-  const { data: nodes } = useQuery<CodeNode[]>({
-    queryKey: ['/api/knowledge-graph/nodes']
+  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+
+  const { data: graphData, isLoading, error } = useQuery<GraphData>({
+    queryKey: ['knowledge-graph'],
+    queryFn: async () => {
+      console.log('Fetching knowledge graph data...');
+      const response = await apiRequest('GET', '/api/knowledge-graph');
+      console.log('Knowledge graph data received:', response);
+      return response;
+    },
   });
 
-  const { data: edges } = useQuery<CodeEdge[]>({
-    queryKey: ['/api/knowledge-graph/edges']
-  });
+  useEffect(() => {
+    console.log('useEffect triggered with graphData:', graphData);
+    
+    if (graphData && graphData.nodes && graphData.edges) {
+      console.log('Graph data received:', graphData);
+      console.log('Nodes count:', graphData.nodes.length);
+      console.log('Edges count:', graphData.edges.length);
+      
+      // Transform nodes to include proper styling and positioning
+      const transformedNodes = graphData.nodes.map((node, index) => {
+        console.log('Processing node:', node);
+        return {
+          ...node,
+          position: { 
+            x: (index % 5) * 200, 
+            y: Math.floor(index / 5) * 100 
+          },
+          style: {
+            ...nodeTypes[node.type]?.style,
+            width: 180,
+            padding: 10,
+          },
+          data: {
+            ...node.data,
+            label: node.data.name,
+          },
+        };
+      });
 
-  const [reactNodes, setNodes, onNodesChange] = useNodesState([]);
-  const [reactEdges, setEdges, onEdgesChange] = useEdgesState([]);
+      // Transform edges to include proper styling
+      const transformedEdges = graphData.edges.map((edge) => {
+        console.log('Processing edge:', edge);
+        return {
+          ...edge,
+          type: 'smoothstep',
+          animated: true,
+          markerEnd: { type: MarkerType.ArrowClosed },
+          style: { stroke: '#94a3b8' },
+          label: edge.data?.relationship,
+        };
+      });
 
-  const transformData = useCallback(() => {
-    if (!nodes || !edges) return;
+      console.log('Setting nodes:', transformedNodes);
+      console.log('Setting edges:', transformedEdges);
+      
+      setNodes(transformedNodes);
+      setEdges(transformedEdges);
+    } else {
+      console.log('No graph data available or data is incomplete');
+    }
+  }, [graphData, setNodes, setEdges]);
 
-    const flowNodes: Node[] = nodes.map(node => ({
-      id: node.id.toString(),
-      type: node.type,
-      data: { label: node.name },
-      position: { x: 0, y: 0 } // You might want to implement proper layout
-    }));
+  console.log('Rendering GraphView with nodes:', nodes.length, 'and edges:', edges.length);
 
-    const flowEdges: Edge[] = edges.map(edge => ({
-      id: edge.id.toString(),
-      source: edge.sourceId.toString(),
-      target: edge.targetId.toString(),
-      label: edge.type,
-      type: 'smoothstep'
-    }));
+  if (isLoading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
 
-    setNodes(flowNodes);
-    setEdges(flowEdges);
-  }, [nodes, edges, setNodes, setEdges]);
-
-  useCallback(() => {
-    transformData();
-  }, [transformData]);
+  if (error) {
+    return (
+      <div className="flex flex-col h-full items-center justify-center p-8 text-center">
+        <div className="text-red-500 text-xl mb-4">
+          {error instanceof Error ? error.message : 'An error occurred while loading the knowledge graph'}
+        </div>
+        {error instanceof Error && error.message.includes('rate limit') && (
+          <div className="text-gray-600 max-w-lg">
+            <p className="mb-4">
+              GitHub API rate limit has been exceeded. This happens when too many requests are made to GitHub in a short period.
+            </p>
+            <p className="mb-4">
+              You can either wait until the rate limit resets, or enable mock mode by setting <code className="bg-gray-100 p-1 rounded">USE_MOCK_GITHUB=true</code> in your <code className="bg-gray-100 p-1 rounded">.env</code> file.
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
-    <div style={{ width: '100%', height: '100%' }}>
+    <div className="h-full w-full">
       <ReactFlow
-        nodes={reactNodes}
-        edges={reactEdges}
+        nodes={nodes}
+        edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        nodeTypes={nodeTypes}
         fitView
+        attributionPosition="bottom-right"
       >
-        <Background />
         <Controls />
+        <MiniMap />
+        <Background gap={12} size={1} />
       </ReactFlow>
     </div>
   );

@@ -10,6 +10,36 @@ import {
   User, InsertUser
 } from "@shared/schema";
 import { eq } from "drizzle-orm";
+import type { Issue as SharedIssue } from "@shared/schema";
+
+// Define the database issue type to match the schema
+interface DatabaseIssue {
+  id: number;
+  sentryId: string;
+  title: string;
+  stacktrace: string;
+  status: string;
+  context: {
+    repository: string;
+    issueUrl: string;
+    labels: string[];
+    codeSnippets: string[];
+    githubMetadata: {
+      owner: string;
+      repo: string;
+      issueNumber: number;
+      created: string;
+      updated: string;
+    };
+  };
+  createdAt: Date | null;
+}
+
+export interface GitHubSettings {
+  githubToken: string;
+  githubOwner: string;
+  githubRepo: string;
+}
 
 export interface IStorage {
   // Issues
@@ -29,7 +59,7 @@ export interface IStorage {
   createMetric(metric: InsertMetric): Promise<Metric>;
 
   // Settings
-  getSettings(): Promise<Settings | undefined>;
+  getSettings(): Promise<GitHubSettings | null>;
   saveSettings(settings: InsertSettings): Promise<Settings>;
 
   // Knowledge Graph
@@ -49,16 +79,17 @@ export class DatabaseStorage implements IStorage {
   // Issues
   async getIssue(id: number): Promise<Issue | undefined> {
     const [issue] = await db.select().from(issues).where(eq(issues.id, id));
-    return issue;
+    return issue ? this.mapDatabaseIssueToIssue(issue as DatabaseIssue) : undefined;
   }
 
   async getIssues(): Promise<Issue[]> {
-    return await db.select().from(issues);
+    const dbIssues = await db.select().from(issues);
+    return dbIssues.map(issue => this.mapDatabaseIssueToIssue(issue as DatabaseIssue));
   }
 
   async createIssue(insertIssue: InsertIssue): Promise<Issue> {
     const [issue] = await db.insert(issues).values(insertIssue).returning();
-    return issue;
+    return this.mapDatabaseIssueToIssue(issue as DatabaseIssue);
   }
 
   async updateIssueStatus(id: number, status: string): Promise<Issue> {
@@ -68,7 +99,18 @@ export class DatabaseStorage implements IStorage {
       .where(eq(issues.id, id))
       .returning();
     if (!issue) throw new Error("Issue not found");
-    return issue;
+    return this.mapDatabaseIssueToIssue(issue as DatabaseIssue);
+  }
+
+  // Helper method to map database issue to Issue type
+  private mapDatabaseIssueToIssue(dbIssue: DatabaseIssue): Issue {
+    return {
+      id: dbIssue.id,
+      title: dbIssue.title,
+      status: dbIssue.status,
+      stacktrace: dbIssue.stacktrace,
+      context: dbIssue.context as Issue['context'] // Type assertion here is safe because we validate the structure in the database
+    };
   }
 
   // Fixes
@@ -107,9 +149,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Settings
-  async getSettings(): Promise<Settings | undefined> {
-    const [setting] = await db.select().from(settings);
-    return setting;
+  async getSettings(): Promise<GitHubSettings | null> {
+    return {
+      githubToken: process.env.GITHUB_TOKEN || '',
+      githubOwner: process.env.GITHUB_OWNER || '',
+      githubRepo: process.env.GITHUB_REPO || ''
+    };
   }
 
   async saveSettings(insertSettings: InsertSettings): Promise<Settings> {

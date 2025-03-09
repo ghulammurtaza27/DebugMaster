@@ -13,7 +13,8 @@ export async function apiRequest(
   method: string,
   path: string,
   data?: unknown | undefined,
-): Promise<Response> {
+  returnJson: boolean = true
+): Promise<any> {
   const url = `${API_BASE}${path}`;
   
   const res = await fetch(url, {
@@ -27,7 +28,7 @@ export async function apiRequest(
   });
 
   await throwIfResNotOk(res);
-  return res;
+  return returnJson ? res.json() : res;
 }
 
 type UnauthorizedBehavior = "returnNull" | "throw";

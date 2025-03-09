@@ -59,6 +59,7 @@ export const metrics = pgTable("metrics", {
   fixesSucceeded: integer("fixes_succeeded").notNull(),
   avgProcessingTime: integer("avg_processing_time").notNull(),
   date: timestamp("date").defaultNow(),
+  validationData: jsonb("validation_data"),
 });
 
 export const settings = pgTable("settings", {
@@ -102,8 +103,14 @@ export const insertFixSchema = createInsertSchema(fixes).omit({
 });
 
 export const insertMetricSchema = createInsertSchema(metrics).omit({
-  id: true,
-  date: true,
+  id: true
+}).extend({
+  validationData: z.object({
+    issueId: z.union([z.string(), z.number()]),
+    file: z.string(),
+    validationIssues: z.array(z.string()),
+    timestamp: z.string()
+  }).optional()
 });
 
 export const insertSettingsSchema = createInsertSchema(settings).omit({
@@ -141,7 +148,26 @@ export const insertSubscriptionSchema = createInsertSchema(subscriptions).omit({
   createdAt: true,
 });
 
-export type Issue = typeof issues.$inferSelect;
+export interface Issue {
+  id: number | string;
+  title: string;
+  status: string;
+  stacktrace: string;
+  context: {
+    repository: string;
+    issueUrl: string;
+    labels: string[];
+    codeSnippets: string[];
+    githubMetadata: {
+      owner: string;
+      repo: string;
+      issueNumber: number;
+      created: string;
+      updated: string;
+    };
+  };
+}
+
 export type InsertIssue = z.infer<typeof insertIssueSchema>;
 export type Fix = typeof fixes.$inferSelect;
 export type InsertFix = z.infer<typeof insertFixSchema>;

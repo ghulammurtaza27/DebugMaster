@@ -37,14 +37,35 @@ export class KnowledgeGraphService {
 
   private async clearExistingGraph() {
     try {
-      // Use a more specific query to delete edges where source_id = 3 (the problematic one)
-      await pool.query('DELETE FROM "code_edges" WHERE source_id = 3 OR target_id = 3');
+      console.log('Clearing existing graph data...');
       
-      // Then delete all other edges
-      await pool.query('DELETE FROM "code_edges"');
+      // Use a transaction to ensure atomicity
+      await pool.query('BEGIN');
       
-      // Finally delete all nodes
-      await pool.query('DELETE FROM "code_nodes"');
+      try {
+        // First disable triggers to avoid foreign key constraint issues
+        await pool.query('SET session_replication_role = replica');
+        
+        // Delete edges first
+        await pool.query('DELETE FROM "code_edges"');
+        console.log('Deleted all code edges');
+        
+        // Then delete nodes
+        await pool.query('DELETE FROM "code_nodes"');
+        console.log('Deleted all code nodes');
+        
+        // Re-enable triggers
+        await pool.query('SET session_replication_role = DEFAULT');
+        
+        // Commit the transaction
+        await pool.query('COMMIT');
+        console.log('Successfully cleared graph data');
+      } catch (error) {
+        // If anything goes wrong, rollback
+        await pool.query('ROLLBACK');
+        console.error('Error during graph clearing, rolled back transaction:', error);
+        throw error;
+      }
     } catch (error) {
       console.error('Error clearing existing graph:', error);
       throw error;
@@ -375,16 +396,27 @@ export class KnowledgeGraphService {
 
   async analyzeRepository(owner: string, repo: string) {
     try {
-      // Get all files from the repository
-      const files = await this.getAllRepositoryFiles(owner, repo);
-
+      console.log(`Starting repository analysis for ${owner}/${repo}`);
+      
       // Clear existing graph data
       await this.clearExistingGraph();
+      console.log('Cleared existing graph data');
+      
+      // Get all files from the repository
+      const files = await this.getAllRepositoryFiles(owner, repo);
+      console.log(`Found ${files.length} files to analyze`);
 
-      // Process each file
+      // Collect file contents for AI context building
+      const fileContentsForContext: Array<{ path: string; content: string }> = [];
+      
+      // Process each file with better error handling
+      let successCount = 0;
+      let errorCount = 0;
+      
       for (const file of files) {
         if (this.isAnalyzableFile(file.path)) {
           try {
+            console.log(`Analyzing file: ${file.path}`);
             const content = await githubService.getFileContents({
               owner,
               repo,
@@ -392,18 +424,38 @@ export class KnowledgeGraphService {
             });
 
             if (typeof content === 'string') {
+              // Store file content for AI context
+              fileContentsForContext.push({
+                path: file.path,
+                content
+              });
+              
+              // Analyze file for knowledge graph
               await this.analyzeFile(file.path, content);
+              successCount++;
             } else {
               console.warn(`Skipping ${file.path}: Expected file content but got directory listing`);
             }
           } catch (error) {
             console.error(`Error analyzing file ${file.path}:`, error);
+            errorCount++;
             // Continue with other files
             continue;
           }
         }
       }
 
+      // Build AI context with the collected file contents
+      try {
+        console.log(`Building AI context with ${fileContentsForContext.length} files`);
+        const contextResult = await this.ai.buildCodebaseContext(owner, repo, fileContentsForContext);
+        console.log(`AI context built successfully: ${JSON.stringify(contextResult)}`);
+      } catch (error) {
+        console.error('Error building AI context:', error);
+        // Continue even if context building fails
+      }
+
+      console.log(`Repository analysis complete. Successfully analyzed ${successCount} files. Errors: ${errorCount}`);
       return true;
     } catch (error) {
       console.error('Error analyzing repository:', error);
@@ -413,6 +465,7 @@ export class KnowledgeGraphService {
 
   private async getAllRepositoryFiles(owner: string, repo: string): Promise<Array<{ path: string }>> {
     try {
+      console.log(`Getting all repository files for ${owner}/${repo}`);
       const response = await githubService.getFileContents({
         owner,
         repo,
@@ -430,11 +483,20 @@ export class KnowledgeGraphService {
         type: item.type 
       }));
       
+      console.log(`Initial directory listing contains ${queue.length} items`);
+      
       // Process files in batches to avoid rate limits
       const batchSize = 5;
+      let processedCount = 0;
+      
       while (queue.length > 0) {
         const batch = queue.splice(0, batchSize);
         await Promise.all(batch.map(async (item) => {
+          processedCount++;
+          if (processedCount % 20 === 0) {
+            console.log(`Processed ${processedCount} items, ${queue.length} remaining in queue`);
+          }
+          
           if (item.type === 'file') {
             if (this.isAnalyzableFile(item.path)) {
               files.push({ path: item.path });
@@ -464,6 +526,7 @@ export class KnowledgeGraphService {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
+      console.log(`Found ${files.length} analyzable files in repository`);
       return files;
     } catch (error) {
       console.error('Error getting repository files:', error);

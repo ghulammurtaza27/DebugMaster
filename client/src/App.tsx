@@ -11,6 +11,7 @@ import Settings from "@/pages/settings";
 import NotFound from "@/pages/not-found";
 import Sidebar from "@/components/layout/sidebar";
 import KnowledgeGraph from "@/pages/knowledge-graph";
+import CodebaseChat from "@/pages/codebase-chat";
 import Auth from "@/pages/auth";
 import Pricing from "@/pages/pricing";
 
@@ -27,6 +28,7 @@ function Router() {
           <ProtectedRoute path="/issues/:id" component={IssueDetail} />
           <ProtectedRoute path="/settings" component={Settings} />
           <ProtectedRoute path="/knowledge-graph" component={KnowledgeGraph} />
+          <ProtectedRoute path="/codebase-chat" component={CodebaseChat} />
           <Route component={NotFound} />
         </Switch>
       </main>

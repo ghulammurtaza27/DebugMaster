@@ -9,8 +9,9 @@ import {
   CodeEdge, InsertCodeEdge,
   User, InsertUser
 } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import { eq, asc } from "drizzle-orm";
 import type { Issue as SharedIssue } from "@shared/schema";
+import { pgTable, serial, text, timestamp, boolean, integer } from 'drizzle-orm/pg-core';
 
 // Define the database issue type to match the schema
 interface DatabaseIssue {
@@ -73,6 +74,11 @@ export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
+
+  // Chat
+  getChatHistory(userId: number): Promise<ChatMessage[]>;
+  saveChatMessage(message: InsertChatMessage): Promise<ChatMessage>;
+  clearChatHistory(userId: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -202,6 +208,49 @@ export class DatabaseStorage implements IStorage {
     const [user] = await db.insert(users).values(insertUser).returning();
     return user;
   }
+
+  // Chat
+  async getChatHistory(userId: number): Promise<ChatMessage[]> {
+    try {
+      return await db.select().from(chatMessages)
+        .where(eq(chatMessages.userId, userId))
+        .orderBy(asc(chatMessages.timestamp));
+    } catch (error) {
+      console.error('Error getting chat history:', error);
+      return [];
+    }
+  }
+
+  async saveChatMessage(message: InsertChatMessage): Promise<ChatMessage> {
+    try {
+      const [result] = await db.insert(chatMessages).values(message).returning();
+      return result;
+    } catch (error) {
+      console.error('Error saving chat message:', error);
+      throw error;
+    }
+  }
+
+  async clearChatHistory(userId: number): Promise<void> {
+    try {
+      await db.delete(chatMessages).where(eq(chatMessages.userId, userId));
+    } catch (error) {
+      console.error('Error clearing chat history:', error);
+      throw error;
+    }
+  }
 }
 
 export const storage = new DatabaseStorage();
+
+// Add this to the schema definitions
+export const chatMessages = pgTable('chat_messages', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id').notNull(),
+  content: text('content').notNull(),
+  isUser: boolean('is_user').notNull(),
+  timestamp: timestamp('timestamp').notNull()
+});
+
+export type ChatMessage = typeof chatMessages.$inferSelect;
+export type InsertChatMessage = typeof chatMessages.$inferInsert;

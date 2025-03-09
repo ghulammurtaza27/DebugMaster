@@ -1,6 +1,6 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
-const API_BASE = 'http://localhost:5000';
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
@@ -17,18 +17,36 @@ export async function apiRequest(
 ): Promise<any> {
   const url = `${API_BASE}${path}`;
   
-  const res = await fetch(url, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    },
-    credentials: 'include',
-    body: data ? JSON.stringify(data) : undefined,
-  });
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      credentials: 'include',
+      body: data ? JSON.stringify(data) : undefined,
+    });
 
-  await throwIfResNotOk(res);
-  return returnJson ? res.json() : res;
+    await throwIfResNotOk(res);
+    
+    if (returnJson) {
+      // Check content type to avoid parsing HTML as JSON
+      const contentType = res.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        return res.json();
+      } else {
+        const text = await res.text();
+        console.error('Received non-JSON response:', text.substring(0, 100) + '...');
+        throw new Error('Server returned non-JSON response. Check server logs for details.');
+      }
+    }
+    
+    return res;
+  } catch (error) {
+    console.error(`API request failed for ${method} ${path}:`, error);
+    throw error;
+  }
 }
 
 type UnauthorizedBehavior = "returnNull" | "throw";

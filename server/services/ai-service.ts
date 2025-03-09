@@ -29,6 +29,7 @@ export interface AIValidationResult {
 export class AIService {
   private model: GenerativeModel;
   private limiter: RateLimiter;
+  private codebaseContext: Map<string, string[]> = new Map(); // Store context for each repository
 
   constructor() {
     const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || '');
@@ -133,6 +134,98 @@ Provide specific suggestions for:
       console.error('AI suggestions generation failed:', error);
       return [];
     }
+  }
+
+  /**
+   * Store context about a codebase for future chat interactions
+   */
+  async buildCodebaseContext(owner: string, repo: string, files: Array<{ path: string; content: string }>) {
+    console.log(`Building codebase context for ${owner}/${repo} with ${files.length} files`);
+    
+    const contextKey = `${owner}/${repo}`;
+    const fileContexts: string[] = [];
+    
+    // Process each file to build context
+    for (const file of files) {
+      // Skip files that are too large or binary
+      if (!file.content || file.content.length > 100000 || this.isBinaryContent(file.content)) {
+        continue;
+      }
+      
+      // Create a summary of the file
+      const fileSummary = `File: ${file.path}\n${file.content.substring(0, 500)}${file.content.length > 500 ? '...' : ''}`;
+      fileContexts.push(fileSummary);
+    }
+    
+    // Store the context
+    this.codebaseContext.set(contextKey, fileContexts);
+    console.log(`Built context for ${owner}/${repo} with ${fileContexts.length} file summaries`);
+    
+    return {
+      filesProcessed: files.length,
+      contextSize: fileContexts.length
+    };
+  }
+  
+  /**
+   * Chat with the codebase - ask questions about code structure, functionality, etc.
+   */
+  async chatWithCodebase(owner: string, repo: string, question: string, conversationHistory: Array<{role: 'user' | 'assistant', content: string}> = []) {
+    await this.limiter.removeTokens(1);
+    
+    try {
+      const contextKey = `${owner}/${repo}`;
+      const codeContext = this.codebaseContext.get(contextKey) || [];
+      
+      if (codeContext.length === 0) {
+        return {
+          answer: "I don't have enough context about this codebase yet. Please analyze the repository first.",
+          contextSize: 0
+        };
+      }
+      
+      console.log(`Chatting with codebase ${owner}/${repo}, context size: ${codeContext.length} files`);
+      
+      // Prepare the prompt with context and conversation history
+      let prompt = `You are an AI assistant that helps developers understand codebases. You have access to the following files from the ${owner}/${repo} repository:\n\n`;
+      
+      // Add a sample of the context (not all to avoid token limits)
+      const contextSample = codeContext.slice(0, 10);
+      prompt += contextSample.join('\n\n');
+      
+      // Add conversation history
+      if (conversationHistory.length > 0) {
+        prompt += '\n\nConversation history:\n';
+        for (const message of conversationHistory) {
+          prompt += `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.content}\n`;
+        }
+      }
+      
+      // Add the current question
+      prompt += `\nUser: ${question}\n\nAssistant: `;
+      
+      // Generate the response
+      const result = await this.model.generateContent(prompt);
+      const response = await result.response;
+      const answer = response.text();
+      
+      return {
+        answer,
+        contextSize: codeContext.length
+      };
+    } catch (error) {
+      console.error('AI codebase chat failed:', error);
+      throw new Error('Failed to chat with codebase using AI');
+    }
+  }
+  
+  /**
+   * Check if content appears to be binary (non-text)
+   */
+  private isBinaryContent(content: string): boolean {
+    // Simple heuristic: check for a high percentage of null bytes or non-printable characters
+    const nonPrintableCount = (content.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) || []).length;
+    return nonPrintableCount > content.length * 0.1;
   }
 
   private parseAnalysisResponse(text: string): AIAnalysisResult {

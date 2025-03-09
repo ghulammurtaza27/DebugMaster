@@ -493,7 +493,9 @@ export class GitHubService extends EventEmitter {
             return Buffer.from(response.data.content, 'base64').toString();
           }
           
-          throw new Error('Invalid response from GitHub API');
+          // If we get here, it's neither a file nor a directory
+          console.warn(`Unexpected response type for ${params.path}:`, response.data);
+          return [];
         } catch (error: any) {
           lastError = error;
 
@@ -521,6 +523,13 @@ export class GitHubService extends EventEmitter {
       throw lastError || new Error('Failed to get contents after retries');
     } catch (error) {
       console.error(`Failed to get contents for ${params.path}:`, error);
+      
+      // Return empty array for directories that can't be accessed
+      if (params.path.includes('/') && !params.path.includes('.')) {
+        console.warn(`Assuming ${params.path} is a directory and returning empty array`);
+        return [];
+      }
+      
       throw error;
     }
   }

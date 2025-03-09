@@ -2,8 +2,32 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { setupAuth } from "./auth";
+import 'dotenv/config';
+// or
+import * as dotenv from 'dotenv';
+import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load env file from project root
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+console.log('DATABASE_URL from index:', process.env.DATABASE_URL);
 
 const app = express();
+
+// Update CORS configuration
+app.use(cors({
+  origin: 'http://localhost:5173', // Only allow the Vite dev server origin
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Explicitly allow methods
+  allowedHeaders: ['Content-Type'], // Explicitly allow headers
+}));
+
+// Make sure these come after CORS
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 

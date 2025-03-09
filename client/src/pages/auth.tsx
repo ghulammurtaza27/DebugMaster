@@ -21,26 +21,43 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useLocation } from "wouter";
+import React from "react";
 
 export default function Auth() {
   const [_, setLocation] = useLocation();
   const { user, loginMutation, registerMutation } = useAuth();
-
-  // Redirect if already logged in
-  if (user) {
-    setLocation("/");
-    return null;
-  }
-
+  
+  // Initialize forms first, before any conditional returns
   const loginForm = useForm({
     resolver: zodResolver(
       insertUserSchema.pick({ username: true, password: true })
     ),
+    defaultValues: {
+      username: '',
+      password: ''
+    }
   });
 
   const registerForm = useForm({
     resolver: zodResolver(insertUserSchema),
+    defaultValues: {
+      username: '',
+      email: '',
+      password: ''
+    }
   });
+
+  // Move the redirect after all hooks are initialized
+  React.useEffect(() => {
+    if (user) {
+      setLocation("/");
+    }
+  }, [user, setLocation]);
+
+  // Remove the early return and use conditional rendering instead
+  if (user) {
+    return null;
+  }
 
   return (
     <div className="min-h-screen flex">

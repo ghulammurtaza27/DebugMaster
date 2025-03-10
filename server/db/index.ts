@@ -1,18 +1,35 @@
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
-import 'dotenv/config';
+import { migrate } from 'drizzle-orm/node-postgres/migrator';
 
-// In ES modules, we need to access the Pool class from the default export
-const { Pool } = pg;
-
-// Create a PostgreSQL connection pool
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+// Create PostgreSQL connection pool with explicit parameters
+const pool = new pg.Pool({
+  host: process.env.DATABASE_HOST || 'localhost',
+  port: parseInt(process.env.DATABASE_PORT || '5432'),
+  user: process.env.DATABASE_USER || 'postgres',
+  password: process.env.DATABASE_PASSWORD || 'cricket',
+  database: process.env.DATABASE_NAME || 'debug-master'
 });
 
-// Create a Drizzle instance
-export const db = drizzle(pool);
+// Add error handler for unexpected pool errors
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle PostgreSQL client:', err);
+  process.exit(-1);
+});
 
-// Export the pool for raw queries
-export { pool }; 
+// Test the connection
+pool.connect()
+  .then(client => {
+    console.log('Successfully connected to PostgreSQL');
+    client.release();
+  })
+  .catch(err => {
+    console.error('Error connecting to PostgreSQL:', err);
+    process.exit(-1);
+  });
+
+// Create drizzle database instance
+const db = drizzle(pool);
+
+// Export both pool and drizzle instance
+export { pool, db }; 

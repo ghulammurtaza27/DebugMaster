@@ -6,7 +6,7 @@ import { githubService } from "./services/github";
 import { rateLimiter } from "./services/rate-limiter";
 import { insertIssueSchema, insertFixSchema, insertMetricSchema, insertSettingsSchema } from "@shared/schema";
 import { issueAnalyzer } from "./services/issue-analyzer";
-import { knowledgeGraph } from "./services/knowledge-graph"; // Assuming this is where knowledgeGraph is defined
+import { knowledgeGraphService } from "./services/knowledge-graph";
 
 
 export async function registerRoutes(app: Express) {
@@ -65,13 +65,13 @@ export async function registerRoutes(app: Express) {
     }
 
     try {
-      // Test Sentry connection
-      const sentry = new sentryService(parsed.data.sentryDsn, parsed.data.sentryToken);
-      await sentry.testConnection();
+      // Test Sentry connection - using the service directly
+      await sentryService.initialize(parsed.data.sentryDsn, parsed.data.sentryToken);
+      await sentryService.testConnection();
 
-      // Test GitHub connection
-      const github = new githubService(parsed.data.githubToken);
-      await github.testConnection(parsed.data.githubOwner, parsed.data.githubRepo);
+      // Test GitHub connection - using the service directly
+      await githubService.initialize(parsed.data.githubToken);
+      await githubService.testConnection(parsed.data.githubOwner, parsed.data.githubRepo);
 
       const settings = await storage.saveSettings(parsed.data);
       res.json(settings);
@@ -149,7 +149,7 @@ export async function registerRoutes(app: Express) {
 
   app.post("/api/knowledge-graph/analyze", async (req, res) => {
     try {
-      await knowledgeGraph.buildProjectGraph("./");
+      await knowledgeGraphService.buildProjectGraph("./");
       res.json({ message: "Analysis complete" });
     } catch (error: any) {
       res.status(500).json({ message: error.message });

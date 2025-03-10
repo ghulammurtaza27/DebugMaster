@@ -9,9 +9,10 @@ import {
   CodeEdge, InsertCodeEdge,
   User, InsertUser
 } from "@shared/schema";
-import { eq, asc } from "drizzle-orm";
+import { eq, asc, and } from "drizzle-orm";
 import type { Issue as SharedIssue } from "@shared/schema";
 import { pgTable, serial, text, timestamp, boolean, integer } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 // Define the database issue type to match the schema
 interface DatabaseIssue {
@@ -79,6 +80,9 @@ export interface IStorage {
   getChatHistory(userId: number): Promise<ChatMessage[]>;
   saveChatMessage(message: InsertChatMessage): Promise<ChatMessage>;
   clearChatHistory(userId: number): Promise<void>;
+
+  // New method
+  clearGraph(): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -171,8 +175,117 @@ export class DatabaseStorage implements IStorage {
 
   // Knowledge Graph
   async createCodeNode(insertNode: InsertCodeNode): Promise<CodeNode> {
-    const [node] = await db.insert(codeNodes).values(insertNode).returning();
-    return node;
+    try {
+      console.log('\n=== Starting createCodeNode ===');
+      console.log(`Creating code node for path: ${insertNode.path}`);
+      console.log('Node data:', {
+        path: insertNode.path,
+        type: insertNode.type,
+        name: insertNode.name,
+        contentLength: insertNode.content?.length || 0
+      });
+      
+      // Validate and prepare input data
+      const nodeData = {
+        path: insertNode.path,
+        type: insertNode.type,
+        name: insertNode.name,
+        content: insertNode.content || '', // Ensure content is never null
+        createdAt: new Date() // Add createdAt field
+      };
+      
+      // Validate required fields
+      if (!nodeData.path || !nodeData.type || !nodeData.name) {
+        const error = new Error(`Invalid node data: missing required fields`);
+        console.error('Validation error:', {
+          hasPath: !!nodeData.path,
+          hasType: !!nodeData.type,
+          hasName: !!nodeData.name
+        });
+        throw error;
+      }
+      
+      // Execute everything in a single transaction
+      const [node] = await db.transaction(async (tx) => {
+        try {
+          console.log('Starting database transaction...');
+          
+          // Check if node already exists with exact match
+          console.log('Checking for existing node...');
+          const existingQuery = tx.select()
+            .from(codeNodes)
+            .where(sql`path = ${nodeData.path} AND type = ${nodeData.type} AND name = ${nodeData.name}`);
+          
+          console.log('Existing node query:', existingQuery.toSQL());
+          const [existingNode] = await existingQuery;
+            
+          if (existingNode) {
+            console.log(`Node already exists with ID: ${existingNode.id}`);
+            return [existingNode];
+          }
+          
+          // Create the insert query
+          const insertQuery = tx.insert(codeNodes).values(nodeData).returning();
+          const sqlString = insertQuery.toSQL();
+          console.log('Insert query:', {
+            sql: sqlString.sql,
+            params: sqlString.params
+          });
+          
+          // Execute the query
+          const [createdNode] = await insertQuery;
+          
+          if (!createdNode) {
+            console.error('No node was created - database returned empty result');
+            throw new Error('Failed to create code node - no node returned');
+          }
+          
+          console.log(`Successfully created code node with ID: ${createdNode.id}`);
+          console.log('Created node data:', {
+            id: createdNode.id,
+            path: createdNode.path,
+            type: createdNode.type,
+            name: createdNode.name,
+            contentLength: createdNode.content?.length || 0
+          });
+          
+          // Verify the node was created by selecting it
+          const verifyQuery = tx.select()
+            .from(codeNodes)
+            .where(sql`id = ${createdNode.id}`);
+          const [verifiedNode] = await verifyQuery;
+          
+          if (!verifiedNode) {
+            throw new Error(`Node verification failed - could not find node with ID ${createdNode.id}`);
+          }
+          
+          return [createdNode];
+        } catch (txError) {
+          console.error('Transaction error creating code node:', txError);
+          if (txError instanceof Error) {
+            console.error('Error stack:', txError.stack);
+            console.error('SQL Error:', txError.message);
+          }
+          throw txError;
+        }
+      });
+      
+      console.log('=== Finished createCodeNode successfully ===\n');
+      return node;
+    } catch (error) {
+      console.error('=== Error in createCodeNode ===');
+      console.error('Error creating code node:', error);
+      if (error instanceof Error) {
+        console.error('Error stack:', error.stack);
+      }
+      console.error('Node data:', {
+        path: insertNode.path,
+        type: insertNode.type,
+        name: insertNode.name,
+        contentLength: insertNode.content?.length || 0
+      });
+      throw error;
+    }
   }
 
   async getCodeNode(id: number): Promise<CodeNode | undefined> {
@@ -185,8 +298,51 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createCodeEdge(insertEdge: InsertCodeEdge): Promise<CodeEdge> {
-    const [edge] = await db.insert(codeEdges).values(insertEdge).returning();
-    return edge;
+    try {
+      console.log(`Creating code edge: ${insertEdge.sourceId} -> ${insertEdge.targetId} (${insertEdge.type})`);
+      console.log('Edge data:', JSON.stringify(insertEdge, null, 2));
+      
+      // Execute everything in a single transaction
+      const [edge] = await db.transaction(async (tx) => {
+        try {
+          // Verify that both source and target nodes exist
+          const [sourceNode] = await tx.select()
+            .from(codeNodes)
+            .where(eq(codeNodes.id, insertEdge.sourceId))
+            .limit(1);
+            
+          const [targetNode] = await tx.select()
+            .from(codeNodes)
+            .where(eq(codeNodes.id, insertEdge.targetId))
+            .limit(1);
+            
+          if (!sourceNode || !targetNode) {
+            throw new Error(`Failed to create edge - ${!sourceNode ? 'source' : 'target'} node not found`);
+          }
+          
+          const [createdEdge] = await tx.insert(codeEdges)
+            .values(insertEdge)
+            .returning();
+            
+          if (!createdEdge) {
+            throw new Error('Failed to create code edge - no edge returned');
+          }
+          
+          console.log(`Successfully created code edge with ID: ${createdEdge.id}`);
+          return [createdEdge];
+        } catch (txError) {
+          console.error('Transaction error creating code edge:', txError);
+          console.error('SQL Query:', tx.insert(codeEdges).values(insertEdge).toSQL());
+          throw txError;
+        }
+      });
+      
+      return edge;
+    } catch (error) {
+      console.error('Error creating code edge:', error);
+      console.error('Edge data:', insertEdge);
+      throw error;
+    }
   }
 
   async getCodeEdges(): Promise<CodeEdge[]> {
@@ -236,6 +392,33 @@ export class DatabaseStorage implements IStorage {
       await db.delete(chatMessages).where(eq(chatMessages.userId, userId));
     } catch (error) {
       console.error('Error clearing chat history:', error);
+      throw error;
+    }
+  }
+
+  async clearGraph(): Promise<void> {
+    try {
+      console.log('Clearing existing graph data...');
+      
+      await db.transaction(async (tx) => {
+        // First disable triggers to avoid foreign key constraint issues
+        await tx.execute(sql`SET session_replication_role = replica`);
+        
+        // Delete edges first
+        await tx.delete(codeEdges);
+        console.log('Deleted all code edges');
+        
+        // Then delete nodes
+        await tx.delete(codeNodes);
+        console.log('Deleted all code nodes');
+        
+        // Re-enable triggers
+        await tx.execute(sql`SET session_replication_role = DEFAULT`);
+        
+        console.log('Successfully cleared graph data');
+      });
+    } catch (error) {
+      console.error('Error clearing graph:', error);
       throw error;
     }
   }

@@ -8,6 +8,8 @@ import ReactFlow, {
   Node,
   Edge,
   MarkerType,
+  Handle,
+  Position,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { useQuery } from '@tanstack/react-query';
@@ -32,12 +34,52 @@ interface GraphEdge extends Edge {
 interface GraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  isAnalyzing?: boolean;
 }
 
+const FileNode = ({ data }: { data: { name: string; content?: string } }) => (
+  <div className="px-4 py-2 shadow-lg rounded-md bg-indigo-500 text-white">
+    <Handle type="target" position={Position.Top} />
+    <div className="font-bold">{data.name}</div>
+    {data.content && (
+      <div className="text-xs mt-1 text-indigo-100 truncate max-w-[160px]">
+        {data.content}
+      </div>
+    )}
+    <Handle type="source" position={Position.Bottom} />
+  </div>
+);
+
+const FunctionNode = ({ data }: { data: { name: string; content?: string } }) => (
+  <div className="px-4 py-2 shadow-lg rounded-md bg-purple-500 text-white">
+    <Handle type="target" position={Position.Top} />
+    <div className="font-bold">{data.name}()</div>
+    {data.content && (
+      <div className="text-xs mt-1 text-purple-100 truncate max-w-[160px]">
+        {data.content}
+      </div>
+    )}
+    <Handle type="source" position={Position.Bottom} />
+  </div>
+);
+
+const ClassNode = ({ data }: { data: { name: string; content?: string } }) => (
+  <div className="px-4 py-2 shadow-lg rounded-md bg-pink-500 text-white">
+    <Handle type="target" position={Position.Top} />
+    <div className="font-bold">class {data.name}</div>
+    {data.content && (
+      <div className="text-xs mt-1 text-pink-100 truncate max-w-[160px]">
+        {data.content}
+      </div>
+    )}
+    <Handle type="source" position={Position.Bottom} />
+  </div>
+);
+
 const nodeTypes = {
-  file: { style: { background: '#6366f1', color: 'white' } },
-  function: { style: { background: '#8b5cf6', color: 'white' } },
-  class: { style: { background: '#ec4899', color: 'white' } },
+  file: FileNode,
+  function: FunctionNode,
+  class: ClassNode,
 };
 
 export default function GraphView() {
@@ -52,38 +94,34 @@ export default function GraphView() {
       console.log('Knowledge graph data received:', response);
       return response;
     },
+    refetchInterval: 5000,
+    refetchIntervalInBackground: true,
   });
 
   useEffect(() => {
     console.log('useEffect triggered with graphData:', graphData);
     
-    if (graphData && graphData.nodes && graphData.edges) {
+    if (graphData?.nodes && graphData.edges) {
       console.log('Graph data received:', graphData);
       console.log('Nodes count:', graphData.nodes.length);
       console.log('Edges count:', graphData.edges.length);
       
-      // Transform nodes to include proper styling and positioning
       const transformedNodes = graphData.nodes.map((node, index) => {
         console.log('Processing node:', node);
         return {
           ...node,
           position: { 
-            x: (index % 5) * 200, 
-            y: Math.floor(index / 5) * 100 
-          },
-          style: {
-            ...nodeTypes[node.type]?.style,
-            width: 180,
-            padding: 10,
+            x: (index % 8) * 300,
+            y: Math.floor(index / 8) * 200
           },
           data: {
-            ...node.data,
-            label: node.data.name,
+            name: node.data.name,
+            content: node.data.content,
+            type: node.data.type,
           },
         };
       });
 
-      // Transform edges to include proper styling
       const transformedEdges = graphData.edges.map((edge) => {
         console.log('Processing edge:', edge);
         return {
@@ -101,14 +139,36 @@ export default function GraphView() {
       
       setNodes(transformedNodes);
       setEdges(transformedEdges);
-    } else {
-      console.log('No graph data available or data is incomplete');
     }
   }, [graphData, setNodes, setEdges]);
 
-  console.log('Rendering GraphView with nodes:', nodes.length, 'and edges:', edges.length);
+  const renderStats = () => {
+    if (!graphData?.nodes) return null;
+    
+    const fileNodes = graphData.nodes.filter(n => n.type === 'file').length;
+    const functionNodes = graphData.nodes.filter(n => n.type === 'function').length;
+    const classNodes = graphData.nodes.filter(n => n.type === 'class').length;
+    
+    return (
+      <div className="absolute top-4 right-4 bg-white/90 p-4 rounded-lg shadow-lg z-10">
+        <h3 className="font-bold mb-2">Analysis Progress</h3>
+        <div className="space-y-1 text-sm">
+          <div>Files: {fileNodes}</div>
+          <div>Functions: {functionNodes}</div>
+          <div>Classes: {classNodes}</div>
+          <div>Total Relationships: {graphData.edges.length}</div>
+          {graphData.isAnalyzing && (
+            <div className="mt-2 flex items-center text-blue-600">
+              <div className="animate-spin rounded-full h-3 w-3 border border-current mr-2" />
+              Analysis in progress...
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
-  if (isLoading) {
+  if (isLoading && (!nodes.length && !edges.length)) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
@@ -137,12 +197,14 @@ export default function GraphView() {
   }
 
   return (
-    <div className="h-full w-full">
+    <div className="h-full w-full relative">
+      {renderStats()}
       <ReactFlow
         nodes={nodes}
         edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
+        nodeTypes={nodeTypes}
         fitView
         attributionPosition="bottom-right"
       >

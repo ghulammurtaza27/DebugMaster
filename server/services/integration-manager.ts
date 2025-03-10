@@ -1,5 +1,5 @@
 import { AIService } from './ai-service';
-import { knowledgeGraph } from './knowledge-graph';
+import { knowledgeGraphService } from './knowledge-graph';
 import { GitHubService } from './github';
 import type { Issue } from '@shared/schema';
 import type { AIAnalysisResult } from './ai-service';
@@ -28,8 +28,8 @@ export class IntegrationManager {
 
   async processIssue(issue: Issue) {
     try {
-      // Use knowledgeGraph instance instead of creating new one
-      const context = await knowledgeGraph.buildContext(issue);
+      // Use knowledgeGraphService instance instead of knowledgeGraph
+      const context = await knowledgeGraphService.buildContext(issue);
 
       // Analyze with AI
       const analysis = await this.ai.analyzeBug({
@@ -74,7 +74,7 @@ export class IntegrationManager {
       );
 
       // Store successful fix in knowledge graph
-      await knowledgeGraph.storeFix(issue, analysis.fix);
+      await knowledgeGraphService.storeFix(issue, analysis.fix);
 
       return analysis;
     } catch (error) {

@@ -33,7 +33,7 @@ export class AIService {
 
   constructor() {
     const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || '');
-    this.model = genAI.getGenerativeModel({ model: 'gemini-pro' });
+    this.model = genAI.getGenerativeModel({ model: 'gemini-flash-1.5' });
     
     // Rate limit to 10 requests per minute
     this.limiter = new RateLimiter({
@@ -73,7 +73,18 @@ Provide a detailed analysis including:
       return this.parseAnalysisResponse(text);
     } catch (error) {
       console.error('AI analysis failed:', error);
-      throw new Error('Failed to analyze bug with AI');
+      
+      // Return a fallback analysis when the AI service fails
+      return {
+        rootCause: 'Analysis could not be completed due to AI service unavailability. The issue appears to be related to ' + 
+                  (params.stacktrace.includes('Neo4j') ? 'database connectivity' : 
+                   params.stacktrace.includes('TypeError') ? 'type errors' : 
+                   params.stacktrace.includes('ReferenceError') ? 'undefined references' : 
+                   'code execution errors'),
+        severity: 'medium',
+        impactedComponents: this.extractImpactedComponents(params.stacktrace, params.fileContext),
+        fix: undefined
+      };
     }
   }
 
@@ -352,6 +363,38 @@ Provide specific suggestions for:
       console.error('Failed to parse code changes:', error);
       return null;
     }
+  }
+
+  // Helper method to extract impacted components from stacktrace
+  private extractImpactedComponents(stacktrace: string, fileContext: string[]): string[] {
+    const components: Set<string> = new Set();
+    
+    // Extract file names from stacktrace
+    const fileRegex = /\s+at\s+(?:\w+\s+\()?([^:)]+)(?::\d+:\d+)?/g;
+    let match;
+    while ((match = fileRegex.exec(stacktrace)) !== null) {
+      const filePath = match[1];
+      if (filePath) {
+        const fileName = filePath.split('/').pop() || '';
+        if (fileName && !fileName.includes('node_modules')) {
+          components.add(fileName.replace(/\.\w+$/, '')); // Remove extension
+        }
+      }
+    }
+    
+    // If no components found, try to extract from file context
+    if (components.size === 0 && fileContext.length > 0) {
+      fileContext.forEach(file => {
+        if (typeof file === 'string' && file.includes('/')) {
+          const fileName = file.split('/').pop() || '';
+          if (fileName) {
+            components.add(fileName.replace(/\.\w+$/, '')); // Remove extension
+          }
+        }
+      });
+    }
+    
+    return Array.from(components);
   }
 }
 

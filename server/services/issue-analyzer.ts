@@ -1,7 +1,7 @@
 import { Issue } from '@shared/schema';
 import { storage } from '../storage';
 import { githubService } from './github';
-import { knowledgeGraph } from './knowledge-graph';
+import { knowledgeGraphService } from './knowledge-graph';
 import { AIService } from './ai-service';
 import { validationService } from './validation-service';
 import * as ts from 'typescript';
@@ -76,14 +76,21 @@ export class IssueAnalyzer {
       );
 
       // Build knowledge graph context
-      const graphContext = await knowledgeGraph.buildContext(issue);
+      const graphContext = await knowledgeGraphService.buildContext(issue);
       
       // Extract code snippets and stack trace
-      const codeSnippets = issue.context.codeSnippets;
-      const stackTrace = issue.stacktrace;
+      const codeSnippets = issue.context.codeSnippets || [];
+      const stackTrace = issue.stacktrace || '';
 
       // Get related files and their content
-      const relatedFiles = await this.getRelatedFilesContent(graphContext.files);
+      // Handle case where graphContext.files might be empty or undefined
+      const filesToAnalyze = graphContext.files || [];
+      const relatedFiles = await this.getRelatedFilesContent(filesToAnalyze);
+
+      // If we don't have any related files but have code snippets, use those
+      if (relatedFiles.length === 0 && codeSnippets.length > 0) {
+        console.log('No related files found from knowledge graph. Using code snippets for analysis.');
+      }
 
       // Perform AI analysis
       const aiAnalysis = await this.ai.analyzeBug({
@@ -107,30 +114,41 @@ export class IssueAnalyzer {
         }))
       } : undefined;
 
-      // Validate proposed fixes
-      if (suggestedFix) {
+      // Validate proposed fixes if we have them
+      if (suggestedFix && suggestedFix.files.length > 0) {
         for (const file of suggestedFix.files) {
-          const validation = await this.validateProposedChange({
-            file: file.path,
-            newCode: file.changes[0].newCode
-          });
-          
-          if (!validation.isValid) {
-            console.warn(`Invalid fix for ${file.path}:`, validation.issues);
-            // Store validation issues for reference
-            await this.storeValidationIssues(issue.id, file.path, validation.issues);
+          try {
+            const validation = await this.validateProposedChange({
+              file: file.path,
+              newCode: file.changes[0].newCode
+            });
+            
+            if (!validation.isValid) {
+              console.warn(`Invalid fix for ${file.path}:`, validation.issues);
+              // Store validation issues for reference
+              await this.storeValidationIssues(issue.id, file.path, validation.issues);
+            }
+          } catch (error) {
+            console.warn(`Validation failed for ${file.path}:`, error);
+            // Continue with other files even if validation fails for one
           }
         }
       }
 
-      // Create branch if needed
-      if (!options.skipBranchCreation) {
-        const branchName = `fix/${issue.id}`;
-        await githubService.createBranch('main', branchName);
+      // Create branch if needed and if we have fixes
+      if (!options.skipBranchCreation && suggestedFix && suggestedFix.files.length > 0) {
+        try {
+          const branchName = `fix/${issue.id}`;
+          await githubService.createBranch('main', branchName);
+        } catch (error) {
+          console.warn('Failed to create branch:', error);
+          // Continue even if branch creation fails
+        }
       }
 
       // Map the relationships to match the expected type
-      const dependencies = graphContext.relationships.map(rel => ({
+      // Handle case where graphContext.relationships might be empty or undefined
+      const dependencies = (graphContext.relationships || []).map((rel: { source: string; relationship: string; target: string }) => ({
         source: rel.source,
         target: rel.target,
         type: rel.relationship
@@ -146,7 +164,7 @@ export class IssueAnalyzer {
           impactedComponents: aiAnalysis.impactedComponents,
           suggestedFix
         },
-        relatedFiles: graphContext.files,
+        relatedFiles: graphContext.files || [],
         dependencies
       };
     } catch (error) {
@@ -201,7 +219,7 @@ export class IssueAnalyzer {
       
       // Validate the change using AI
       const validation = await this.ai.validateFix(
-        originalContent,
+        typeof originalContent === 'string' ? originalContent : JSON.stringify(originalContent),
         change.newCode
       );
 

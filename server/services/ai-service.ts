@@ -17,6 +17,19 @@ export interface AIAnalysisResult {
       }>;
     }>;
   };
+  diagnostics?: {
+    message: string;
+    reasons: string[];
+    suggestions: string[];
+  };
+  noFixReason?: string;
+  contextQuality?: {
+    score: number;
+    hasStacktrace: boolean;
+    hasCodeSnippets: boolean;
+    hasRelevantFiles: boolean;
+    suggestions: string[];
+  };
 }
 
 interface ProjectContext {
@@ -71,6 +84,14 @@ export class AIService {
     await this.limiter.removeTokens(1);
 
     try {
+      // Log input parameters for debugging
+      console.log('AI analysis input:', {
+        issueDescription: params.issueDescription,
+        stacktraceLength: params.stacktrace?.length || 0,
+        codeSnippetsCount: params.codeSnippets?.length || 0,
+        fileContextCount: params.fileContext?.length || 0
+      });
+
       const sortedFiles = params.fileContext
         .sort((a, b) => b.relevance - a.relevance)
         .map(f => `File: ${f.path}\n${f.content}`);
@@ -116,17 +137,32 @@ Please provide a detailed analysis including:
 1. Root cause analysis with specific line numbers and files
 2. Severity assessment (high/medium/low) with justification
 3. List of impacted components and their relationships
-4. Suggested fix with specific code changes, ensuring:
-   - All necessary imports are included
-   - Changes are minimal and focused
-   - Each change has a clear explanation
-   - Changes maintain existing code style
-   - No breaking changes to the API
+4. Suggested fix with specific code changes in the following format:
+   \`\`\`
+   File: [exact file path]
+   [complete code snippet with your changes]
+   \`\`\`
+   For each file you modify, include:
+   - All necessary imports
+   - Complete function or class definitions
+   - Clear comments explaining your changes
 5. Potential side effects of the proposed fix
-6. Test cases to add or modify`;
+6. Test cases to add or modify
+
+IMPORTANT: For your suggested fix, always include the complete file path and the full code snippet in a code block. If you don't have enough information to propose a specific fix, explain what additional information would be needed.`;
 
       const result = await this.model.generateContent(prompt);
-      return this.parseAnalysisResponse(result.response.text());
+      const responseText = result.response.text();
+      
+      // Log AI response for debugging
+      console.log('AI response length:', responseText.length);
+      console.log('AI response preview:', responseText.substring(0, 500) + '...');
+      
+      // Check for code blocks
+      const codeBlocks = responseText.match(/```[\s\S]*?```/g);
+      console.log('Code blocks found:', codeBlocks?.length || 0);
+      
+      return this.parseAnalysisResponse(responseText);
     } catch (error) {
       console.error('AI analysis failed:', error);
       return this.generateFallbackAnalysis(params);
@@ -367,11 +403,14 @@ Provide specific suggestions for:
     }>;
   }> | null {
     try {
+      // Look for code blocks with triple backticks
       const codeBlockRegex = /```[\s\S]*?```/g;
       const codeBlocks = text.match(codeBlockRegex);
       
-      if (!codeBlocks) return null;
-
+      // Also look for sections that might contain code changes
+      const fixSectionRegex = /(?:Fix|Solution|Code changes|Suggested fix):([\s\S]*?)(?:\n\n|\n##|$)/i;
+      const fixSection = text.match(fixSectionRegex);
+      
       const changes: Array<{
         file: string;
         changes: Array<{
@@ -383,26 +422,112 @@ Provide specific suggestions for:
         }>;
       }> = [];
 
-      for (const block of codeBlocks) {
-        const lines = block.replace(/```/g, '').trim().split('\n');
-        const fileMatch = lines[0].match(/File: (.*)/);
-        if (!fileMatch) continue;
+      // Process code blocks
+      if (codeBlocks) {
+        for (const block of codeBlocks) {
+          const lines = block.replace(/```/g, '').trim().split('\n');
+          
+          // Try to find file name in first line or nearby text
+          const fileMatch = lines[0].match(/File: (.*)/i) || lines[0].match(/^([^:\n]+\.[a-z]+)$/i);
+          let file = '';
+          let codeLines = lines;
+          
+          if (fileMatch) {
+            file = fileMatch[1].trim();
+            codeLines = lines.slice(1); // Remove the file line
+          } else {
+            // Try to infer file from context around the code block
+            const beforeBlock = text.substring(0, text.indexOf(block));
+            const fileInferRegex = /(?:in|file|path|modify):\s*([^\s,\n]+\.[a-z]+)/i;
+            const inferMatch = beforeBlock.match(fileInferRegex);
+            file = inferMatch ? inferMatch[1].trim() : 'unknown.js';
+          }
 
-        const file = fileMatch[1];
-        const changeBlock = {
-          file,
-          changes: [{
-            lineStart: 1,
-            lineEnd: lines.length - 1,
-            oldCode: '',
-            newCode: lines.slice(1).join('\n'),
-            explanation: 'AI-generated fix'
-          }]
-        };
+          // Skip empty code blocks or those that appear to be examples rather than fixes
+          if (codeLines.length === 0 || block.includes('example') || block.includes('Example')) {
+            continue;
+          }
 
-        changes.push(changeBlock);
+          // Extract explanation from surrounding text
+          let explanation = 'AI-generated fix';
+          const blockIndex = text.indexOf(block);
+          if (blockIndex > 0) {
+            const beforeBlock = text.substring(0, blockIndex).trim();
+            const lastParagraph = beforeBlock.split('\n\n').pop() || '';
+            if (lastParagraph.length > 0 && lastParagraph.length < 500) {
+              explanation = lastParagraph;
+            }
+          }
+
+          const changeBlock = {
+            file,
+            changes: [{
+              lineStart: 1,
+              lineEnd: codeLines.length,
+              oldCode: '',
+              newCode: codeLines.join('\n'),
+              explanation
+            }]
+          };
+
+          changes.push(changeBlock);
+        }
       }
 
+      // If no changes found but there's a fix section, try to extract from there
+      if (changes.length === 0 && fixSection && fixSection[1]) {
+        const fixText = fixSection[1].trim();
+        
+        // Simple heuristic: if the fix section contains code-like content
+        if (fixText.includes('{') || fixText.includes('function') || fixText.includes('const') || 
+            fixText.includes('import') || fixText.includes('export')) {
+          
+          // Try to find a file reference in the fix section
+          const fileInferRegex = /(?:in|file|path|modify):\s*([^\s,\n]+\.[a-z]+)/i;
+          const inferMatch = fixText.match(fileInferRegex);
+          const file = inferMatch ? inferMatch[1].trim() : 'inferred-file.js';
+          
+          changes.push({
+            file,
+            changes: [{
+              lineStart: 1,
+              lineEnd: 1,
+              oldCode: '',
+              newCode: fixText,
+              explanation: 'Inferred from AI analysis'
+            }]
+          });
+        }
+      }
+
+      // Look for diff blocks which might contain old and new code
+      if (changes.length === 0) {
+        const diffRegex = /```diff\n([\s\S]*?)```/g;
+        let diffMatch;
+        
+        while ((diffMatch = diffRegex.exec(text)) !== null) {
+          const diffContent = diffMatch[1];
+          const fileMatch = diffContent.match(/^(?:---|\+\+\+)\s+([^\s\n]+)/m);
+          const file = fileMatch ? fileMatch[1].replace(/^[ab]\//, '') : 'diff-file.js';
+          
+          // Split into old and new code sections
+          const oldLines = diffContent.match(/^-[^\n]+/gm)?.map(line => line.substring(1)) || [];
+          const newLines = diffContent.match(/^\+[^\n]+/gm)?.map(line => line.substring(1)) || [];
+          
+          changes.push({
+            file,
+            changes: [{
+              lineStart: 1,
+              lineEnd: newLines.length,
+              oldCode: oldLines.join('\n'),
+              newCode: newLines.join('\n'),
+              explanation: 'Extracted from diff'
+            }]
+          });
+        }
+      }
+
+      console.log(`Parsed ${changes.length} code changes from AI response`);
       return changes.length > 0 ? changes : null;
     } catch (error) {
       console.error('Failed to parse code changes:', error);
@@ -491,11 +616,50 @@ Provide specific suggestions for:
     fileContext: FileContextItem[];
     issueDescription: string;
   }): AIAnalysisResult {
+    console.log('Generating fallback analysis due to AI failure');
+    
+    // Try to extract some basic information from the available data
+    const errorType = this.extractErrorType(params.stacktrace);
+    const severity = this.determineSeverity(params.stacktrace);
+    const impactedComponents = this.extractImpactedComponents(params.stacktrace, 
+      params.fileContext.map(f => f.path));
+    
+    // Generate a more informative root cause message
+    let rootCause = 'Failed to analyze with AI';
+    if (errorType) {
+      rootCause = `${errorType}: ${params.issueDescription}`;
+    } else if (params.stacktrace) {
+      rootCause = `Error in ${params.stacktrace.split('\n')[0]}`;
+    }
+    
     return {
-      rootCause: 'Failed to analyze with AI',
-      severity: 'medium',
-      impactedComponents: [],
+      rootCause,
+      severity,
+      impactedComponents,
+      // Include a basic diagnostic message in the analysis
+      diagnostics: {
+        message: 'The AI was unable to generate a specific fix for this issue. This could be due to:',
+        reasons: [
+          'Insufficient context or code samples',
+          'Complex issue requiring more detailed analysis',
+          'Missing dependencies or configuration information',
+          'Error occurring in third-party libraries'
+        ],
+        suggestions: [
+          'Try providing more code context around the error',
+          'Include relevant configuration files',
+          'Specify the exact steps to reproduce the issue',
+          'Consider manual debugging with the provided stack trace'
+        ]
+      }
     };
+  }
+  
+  private extractErrorType(stacktrace: string): string | null {
+    if (!stacktrace) return null;
+    
+    const errorMatch = stacktrace.match(/([A-Za-z]+Error):/);
+    return errorMatch ? errorMatch[1] : null;
   }
 
   private determineSeverity(stacktrace: string): 'high' | 'medium' | 'low' {

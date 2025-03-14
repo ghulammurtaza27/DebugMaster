@@ -844,6 +844,70 @@ class KnowledgeGraphService {
     }
   }
 
+  /**
+   * Store analysis result even when no fix is proposed
+   * This helps track what was analyzed and why no fix was generated
+   */
+  async storeAnalysisResult(issue: Issue, analysis: any) {
+    try {
+      if (!this.isNeo4jAvailable || !this.driver) {
+        console.log('Neo4j not available, skipping analysis result storage');
+        return;
+      }
+
+      const session = this.driver.session();
+      
+      // Create analysis node
+      await session.run(`
+        MERGE (i:Issue { id: $issueId })
+        CREATE (a:Analysis {
+          id: $analysisId,
+          rootCause: $rootCause,
+          severity: $severity,
+          createdAt: timestamp()
+        })
+        CREATE (i)-[r:HAS_ANALYSIS]->(a)
+      `, {
+        issueId: issue.id,
+        analysisId: `analysis-${issue.id}`,
+        rootCause: analysis.rootCause || 'Unknown',
+        severity: analysis.severity || 'medium'
+      });
+
+      // Store impacted components if available
+      if (analysis.impactedComponents && analysis.impactedComponents.length > 0) {
+        for (const component of analysis.impactedComponents) {
+          await session.run(`
+            MATCH (a:Analysis { id: $analysisId })
+            MERGE (c:Component { name: $component })
+            CREATE (a)-[r:IMPACTS]->(c)
+          `, {
+            analysisId: `analysis-${issue.id}`,
+            component
+          });
+        }
+      }
+
+      // Store diagnostics if available
+      if (analysis.diagnostics) {
+        await session.run(`
+          MATCH (a:Analysis { id: $analysisId })
+          SET a.diagnostics = $diagnostics
+        `, {
+          analysisId: `analysis-${issue.id}`,
+          diagnostics: JSON.stringify(analysis.diagnostics)
+        });
+      }
+
+      console.log(`Successfully stored analysis result for issue ${issue.id}`);
+      return true;
+    } catch (error) {
+      console.error('Error storing analysis result in knowledge graph:', error);
+      // Don't throw error to avoid disrupting the main flow
+      return false;
+    }
+  }
+
   async getRelatedFiles(issueId: string) {
     if (!this.isNeo4jAvailable || !this.driver) {
       // Return empty array if Neo4j is not available

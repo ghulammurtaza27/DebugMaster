@@ -182,7 +182,38 @@ export class IntegrationManager {
 
       if (!analysis.fix) {
         console.warn('No fix proposed by AI analysis');
-        return analysis;
+        
+        // Log more detailed information about why no fix was proposed
+        if (analysis.diagnostics) {
+          console.log('AI analysis diagnostics:', {
+            message: analysis.diagnostics.message,
+            reasons: analysis.diagnostics.reasons,
+            suggestions: analysis.diagnostics.suggestions
+          });
+        }
+        
+        // Check if we have enough context to make a meaningful analysis
+        const contextQuality = this.assessContextQuality({
+          stacktrace: issue.stacktrace || '',
+          codeSnippets,
+          fileContext
+        });
+        
+        console.log('Context quality assessment:', contextQuality);
+        
+        // Store the analysis result even without a fix
+        try {
+          await knowledgeGraphService.storeAnalysisResult(issue, analysis);
+          console.log('Stored analysis result without fix');
+        } catch (storeError) {
+          console.error('Failed to store analysis result:', storeError);
+        }
+        
+        return {
+          ...analysis,
+          noFixReason: 'The AI was unable to generate a specific fix for this issue',
+          contextQuality
+        };
       }
 
       // Validate proposed fix
@@ -234,5 +265,64 @@ export class IntegrationManager {
     }).join('\n\n');
 
     return `## Automated Fix\n\n${changes}\n\nThis pull request was automatically generated to fix reported issues.`;
+  }
+  
+  /**
+   * Assess the quality of the context provided for analysis
+   * This helps determine if we have enough information to make a meaningful analysis
+   */
+  private assessContextQuality(params: {
+    stacktrace: string;
+    codeSnippets: string[];
+    fileContext: FileContextItem[];
+  }): {
+    score: number;
+    hasStacktrace: boolean;
+    hasCodeSnippets: boolean;
+    hasRelevantFiles: boolean;
+    suggestions: string[];
+  } {
+    const suggestions: string[] = [];
+    let score = 0;
+    
+    // Check if we have a stack trace
+    const hasStacktrace = params.stacktrace.length > 0;
+    if (hasStacktrace) {
+      score += 0.3;
+    } else {
+      suggestions.push('Provide a stack trace to help identify the error location');
+    }
+    
+    // Check if we have code snippets
+    const hasCodeSnippets = params.codeSnippets.length > 0;
+    if (hasCodeSnippets) {
+      score += 0.2;
+    } else {
+      suggestions.push('Include code snippets related to the error');
+    }
+    
+    // Check if we have relevant files
+    const hasRelevantFiles = params.fileContext.length > 0;
+    if (hasRelevantFiles) {
+      // Bonus points for having highly relevant files
+      const highlyRelevantFiles = params.fileContext.filter(f => f.relevance > 0.7).length;
+      score += 0.2 + (Math.min(highlyRelevantFiles, 3) * 0.1);
+    } else {
+      suggestions.push('Provide more file context around the error');
+    }
+    
+    // Add general suggestions if score is low
+    if (score < 0.5) {
+      suggestions.push('Consider providing more detailed error description');
+      suggestions.push('Include information about the environment and dependencies');
+    }
+    
+    return {
+      score,
+      hasStacktrace,
+      hasCodeSnippets,
+      hasRelevantFiles,
+      suggestions
+    };
   }
 } 

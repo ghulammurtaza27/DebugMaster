@@ -8,6 +8,12 @@ import * as ts from 'typescript';
 import { ESLint } from 'eslint';
 import { InsertMetric } from '@shared/schema';
 
+interface FileContextItem {
+  path: string;
+  content: string;
+  relevance: number;
+}
+
 interface AnalyzeOptions {
   skipBranchCreation?: boolean;
 }
@@ -77,32 +83,44 @@ export class IssueAnalyzer {
 
       // Build knowledge graph context
       const graphContext = await knowledgeGraphService.buildContext(issue);
+      console.log('Knowledge graph context built with', graphContext.files.length, 'files');
       
       // Extract code snippets and stack trace
-      const codeSnippets = issue.context.codeSnippets || [];
+      const codeSnippets = issue.context?.codeSnippets || [];
       const stackTrace = issue.stacktrace || '';
 
       // Get related files and their content
       // Handle case where graphContext.files might be empty or undefined
       const filesToAnalyze = graphContext.files || [];
+      console.log('Files to analyze:', filesToAnalyze.map(file => typeof file === 'object' ? file.path : file));
+      
       const relatedFiles = await this.getRelatedFilesContent(filesToAnalyze);
+      console.log('Retrieved', relatedFiles.length, 'related files');
 
       // If we don't have any related files but have code snippets, use those
       if (relatedFiles.length === 0 && codeSnippets.length > 0) {
         console.log('No related files found from knowledge graph. Using code snippets for analysis.');
       }
 
+      // Extract description from issue or from graphContext metadata
+      const description = (issue as any).description || graphContext.metadata?.description || issue.title;
+      console.log('Using description for analysis:', description.substring(0, 100) + (description.length > 100 ? '...' : ''));
+
       // Perform AI analysis
-      const aiAnalysis = await this.ai.analyzeBug({
+      const analysis = await this.ai.analyzeBug({
         stacktrace: stackTrace,
         codeSnippets,
-        fileContext: relatedFiles,
-        issueDescription: issue.title
+        fileContext: filesToAnalyze,
+        issueDescription: description,
+        projectContext: {
+          projectStructure: graphContext.projectStructure,
+          dependencies: graphContext.metadata?.dependencies || {}
+        }
       });
 
       // Transform AI analysis fix format to match expected format
-      const suggestedFix = aiAnalysis.fix ? {
-        files: aiAnalysis.fix.changes.map(change => ({
+      const suggestedFix = analysis.fix ? {
+        files: analysis.fix.changes.map(change => ({
           path: change.file,
           changes: change.changes.map(c => ({
             lineStart: c.lineStart,
@@ -159,12 +177,12 @@ export class IssueAnalyzer {
         stackTrace,
         status: 'analyzed',
         analysis: {
-          rootCause: aiAnalysis.rootCause,
-          severity: aiAnalysis.severity,
-          impactedComponents: aiAnalysis.impactedComponents,
+          rootCause: analysis.rootCause,
+          severity: analysis.severity,
+          impactedComponents: analysis.impactedComponents,
           suggestedFix
         },
-        relatedFiles: graphContext.files || [],
+        relatedFiles: filesToAnalyze.map(file => file.path),
         dependencies
       };
     } catch (error) {
@@ -177,24 +195,48 @@ export class IssueAnalyzer {
     }
   }
 
-  private async getRelatedFilesContent(filePaths: string[]): Promise<string[]> {
+  private async getRelatedFilesContent(files: FileContextItem[]): Promise<string[]> {
     const contents: string[] = [];
-    for (const path of filePaths) {
+    console.log('Getting related files content for', files.length, 'files');
+    
+    for (const file of files) {
       try {
+        console.log('Processing file:', typeof file === 'object' ? JSON.stringify({path: file.path}) : file);
+        
+        // If the file already has content, use it
+        if (file.content) {
+          console.log(`Using existing content for ${file.path}`);
+          contents.push(`File: ${file.path}\n${file.content}`);
+          continue;
+        }
+        
+        // Otherwise, fetch content from GitHub
         // Get settings first to access owner and repo
         const settings = await storage.getSettings();
         if (!settings) {
           throw new Error('GitHub settings not configured');
         }
 
+        // Ensure file.path is a string before passing it to getFileContents
+        if (typeof file.path !== 'string') {
+          console.warn(`Invalid file path: ${JSON.stringify(file.path)}`);
+          continue;
+        }
+
+        console.log(`Fetching content for ${file.path} from GitHub`);
         const content = await githubService.getFileContents({
           owner: settings.githubOwner,
           repo: settings.githubRepo,
-          path
+          path: file.path
         });
-        contents.push(`File: ${path}\n${content}`);
+        
+        if (typeof content === 'string') {
+          contents.push(`File: ${file.path}\n${content}`);
+        } else {
+          console.warn(`Received non-string content for ${file.path}, skipping`);
+        }
       } catch (error) {
-        console.warn(`Failed to get content for ${path}:`, error);
+        console.warn(`Failed to get content for ${file.path}:`, error);
       }
     }
     return contents;

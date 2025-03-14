@@ -61,10 +61,12 @@ export class GitHubService extends EventEmitter {
       console.log('Initializing GitHub service...');
       
       if (!this.token && !this.useMockData) {
+        console.error('GitHub token not configured');
         throw new Error('GitHub token not configured. Please check your environment variables or settings.');
       }
 
       if (!this.owner || !this.repo) {
+        console.error('GitHub owner or repo not configured', { owner: this.owner, repo: this.repo });
         throw new Error('GitHub owner and repo must be configured.');
       }
 
@@ -76,10 +78,11 @@ export class GitHubService extends EventEmitter {
       }
 
       // Create Octokit instance
-      console.log('Creating Octokit instance...');
+      console.log('Creating Octokit instance with token...');
       this.octokit = new Octokit({
         auth: this.token
       });
+      console.log('Octokit instance created successfully');
 
       // Verify authentication
       try {
@@ -88,7 +91,11 @@ export class GitHubService extends EventEmitter {
         this.authenticatedUser = user.login;
         console.log(`Successfully authenticated as ${this.authenticatedUser}`);
       } catch (authError: any) {
-        console.error('GitHub authentication failed:', authError.message);
+        console.error('GitHub authentication failed:', authError.message, {
+          status: authError.status,
+          headers: authError.response?.headers,
+          stack: authError.stack
+        });
         if (authError.status === 401) {
           throw new Error('Invalid GitHub token. Please check your token and try again.');
         }
@@ -102,11 +109,21 @@ export class GitHubService extends EventEmitter {
         });
       }
 
-      console.log('GitHub service initialized successfully');
+      console.log('GitHub service initialized successfully', {
+        hasOctokit: !!this.octokit,
+        authenticatedUser: this.authenticatedUser,
+        hasWebhooks: !!this.webhooks
+      });
     } catch (error) {
       console.error('Failed to initialize GitHub service:', error);
       throw error;
     }
+  }
+
+  // Check if the GitHub client is initialized
+  isInitialized(): boolean {
+    // We're initialized if we're using mock data or if we have a valid Octokit instance
+    return this.useMockData || (!!this.octokit && !!this.authenticatedUser);
   }
 
   private async setupWebhooks() {
@@ -426,19 +443,36 @@ export class GitHubService extends EventEmitter {
 
   async processIssueFromUrl(issueUrl: string): Promise<Issue> {
     try {
+      // Make sure GitHub client is initialized
+      console.log('Initializing GitHub client for processing issue from URL...');
       await this.initialize();
-      if (!this.octokit) throw new Error("GitHub client not initialized");
-
+      
+      // Double-check initialization was successful
+      if (!this.isInitialized()) {
+        console.error('GitHub client initialization failed - cannot continue');
+        throw new Error("GitHub client initialization failed");
+      } else {
+        console.log('GitHub client successfully initialized');
+      }
+      
       const { owner, repo, issueNumber } = this.parseIssueUrl(issueUrl);
+      console.log(`Parsed issue URL: owner=${owner}, repo=${repo}, issueNumber=${issueNumber}`);
       
       // Fetch issue details
-      const { data: githubIssue } = await this.octokit.issues.get({
+      console.log(`Fetching issue details for ${owner}/${repo}#${issueNumber}...`);
+      const { data: githubIssue } = await this.octokit!.issues.get({
         owner,
         repo,
         issue_number: issueNumber
       });
+      console.log(`Successfully fetched issue: ${githubIssue.title}`);
+
+      // Extract description from issue body
+      const description = githubIssue.body || '';
+      console.log(`Issue description length: ${description.length} characters`);
 
       // Create issue in our system
+      console.log('Creating issue in our system...');
       const issue = await storage.createIssue({
         sentryId: `GH-${owner}-${repo}-${issueNumber}`,
         title: githubIssue.title,
@@ -458,12 +492,28 @@ export class GitHubService extends EventEmitter {
           }
         }
       });
+      
+      // Add description to the issue object
+      (issue as any).description = description;
+      console.log(`Created issue in our system with ID: ${issue.id}`);
 
       // Skip branch creation during initial analysis
+      console.log('Analyzing issue...');
       await issueAnalyzer.analyzeIssue(issue, { skipBranchCreation: true });
+      console.log('Issue analysis complete');
 
+      // Create and initialize the integration manager
+      console.log('Creating and initializing IntegrationManager...');
       const integrationManager = new IntegrationManager();
+      
+      // Pass the initialized GitHub client to the integration manager
+      console.log('Setting GitHub client on IntegrationManager...');
+      integrationManager.setGitHubClient(this);
+      
+      // Process the issue
+      console.log('Processing issue with IntegrationManager...');
       await integrationManager.processIssue(issue);
+      console.log('Issue processing complete');
 
       return issue;
     } catch (error) {
@@ -522,20 +572,62 @@ export class GitHubService extends EventEmitter {
   }
 
   async getFileContents(params: FileContentsParams): Promise<string | Array<{ name: string; path: string; type: string }>> {
-    // If using mock data, return mock file contents
-    if (this.useMockData) {
-      return this.getMockFileContents(params.path);
+    // Log the params for debugging
+    console.log('getFileContents params:', {
+      owner: params.owner,
+      repo: params.repo,
+      path: typeof params.path === 'object' ? JSON.stringify(params.path) : params.path,
+      pathType: typeof params.path
+    });
+    
+    // Handle case where path is an object instead of a string (happens with default context files)
+    let path: string | any = params.path;
+    if (typeof path !== 'string') {
+      // If path is an object with a path property, extract it
+      if (path && typeof path === 'object' && 'path' in path) {
+        const pathObj = path as { path: string };
+        if (typeof pathObj.path === 'string') {
+          console.log(`Path is an object with path property: ${pathObj.path}`);
+          path = pathObj.path;
+        } else {
+          console.error('Invalid path property type:', typeof pathObj.path);
+          throw new Error(`Invalid path property type: ${typeof pathObj.path}`);
+        }
+      } else {
+        console.error('Invalid path parameter:', path);
+        throw new Error(`Invalid path parameter: ${JSON.stringify(path)}`);
+      }
     }
     
-    if (!this.octokit) throw new Error("GitHub client not initialized");
+    // Handle special case files generated by the knowledge graph service
+    if (path === 'issue-context.txt' || path === 'repository-info.txt') {
+      console.log(`Returning content for special file: ${path}`);
+      return `This is a generated file for ${path}. It contains context information for the issue.`;
+    }
     
-    // Check if we're rate limited
-    if (this.rateLimitExceeded && Date.now() < this.rateLimitReset) {
-      const resetDate = new Date(this.rateLimitReset);
-      throw new Error(`GitHub API rate limit exceeded. Reset at ${resetDate.toLocaleTimeString()}`);
+    // If using mock data, return mock file contents
+    if (this.useMockData) {
+      return this.getMockFileContents(path);
     }
     
     try {
+      // Ensure we're initialized
+      if (!this.octokit) {
+        console.log('GitHub client not initialized, initializing now...');
+        await this.initialize();
+        
+        // Double-check initialization was successful
+        if (!this.octokit) {
+          throw new Error("GitHub client initialization failed");
+        }
+      }
+      
+      // Check if we're rate limited
+      if (this.rateLimitExceeded && Date.now() < this.rateLimitReset) {
+        const resetDate = new Date(this.rateLimitReset);
+        throw new Error(`GitHub API rate limit exceeded. Reset at ${resetDate.toLocaleTimeString()}`);
+      }
+      
       const maxRetries = 3;
       let retryCount = 0;
       let lastError: any;
@@ -545,7 +637,7 @@ export class GitHubService extends EventEmitter {
           const response = await this.octokit.repos.getContent({
             owner: params.owner,
             repo: params.repo,
-            path: params.path,
+            path: path,
           });
 
           if (Array.isArray(response.data)) {
@@ -563,7 +655,7 @@ export class GitHubService extends EventEmitter {
           }
           
           // If we get here, it's neither a file nor a directory
-          console.warn(`Unexpected response type for ${params.path}:`, response.data);
+          console.warn(`Unexpected response type for ${path}:`, response.data);
           return [];
         } catch (error: any) {
           lastError = error;
@@ -591,11 +683,11 @@ export class GitHubService extends EventEmitter {
 
       throw lastError || new Error('Failed to get contents after retries');
     } catch (error) {
-      console.error(`Failed to get contents for ${params.path}:`, error);
+      console.error(`Failed to get contents for ${path}:`, error);
       
       // Return empty array for directories that can't be accessed
-      if (params.path.includes('/') && !params.path.includes('.')) {
-        console.warn(`Assuming ${params.path} is a directory and returning empty array`);
+      if (typeof path === 'string' && path.includes('/') && !path.includes('.')) {
+        console.warn(`Assuming ${path} is a directory and returning empty array`);
         return [];
       }
       

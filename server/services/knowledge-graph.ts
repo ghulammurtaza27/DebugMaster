@@ -634,8 +634,56 @@ class KnowledgeGraphService {
         stackTraceFiles: stackTraceFiles.length,
         mentionedFiles: mentionedFiles.length,
         testFiles: testContext.files.length,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        description: issue.description || 'No description provided',
+        repository: issue.context?.repository || 'Unknown',
+        issueUrl: issue.context?.issueUrl || 'Unknown',
+        labels: issue.context?.labels || [],
+        githubMetadata: issue.context?.githubMetadata || null
       };
+      
+      // If no files were found, add some default context
+      if (context.files.length === 0) {
+        console.log('No files found, adding default context');
+        
+        // Create issue context file
+        const issueContextFile = {
+          path: 'issue-context.txt',
+          content: `Issue Title: ${issue.title}\nRepository: ${issue.context?.repository || 'Unknown'}\nDescription: ${issue.description || 'No description provided'}`,
+          relevance: 1.0
+        };
+        
+        context.files.push(issueContextFile);
+        console.log('Added issue context file:', issueContextFile.path);
+        
+        // Create repository info file if available
+        if (issue.context?.repository) {
+          const repoInfoFile = {
+            path: 'repository-info.txt',
+            content: `Repository: ${issue.context.repository}\nOwner: ${issue.context.githubMetadata?.owner || 'Unknown'}\nRepo: ${issue.context.githubMetadata?.repo || 'Unknown'}`,
+            relevance: 0.8
+          };
+          
+          context.files.push(repoInfoFile);
+          console.log('Added repository info file:', repoInfoFile.path);
+        }
+        
+        // Add code snippets as separate files if available
+        if (issue.context?.codeSnippets && issue.context.codeSnippets.length > 0) {
+          issue.context.codeSnippets.forEach((snippet, index) => {
+            const snippetFile = {
+              path: `code-snippet-${index + 1}.txt`,
+              content: snippet,
+              relevance: 0.9
+            };
+            
+            context.files.push(snippetFile);
+            console.log(`Added code snippet file: code-snippet-${index + 1}.txt`);
+          });
+        }
+        
+        console.log('Added default context files:', context.files.map(file => file.path));
+      }
 
       return context;
     } catch (error) {
@@ -1192,12 +1240,49 @@ class KnowledgeGraphService {
 
   // New method to provide fallback functionality when Neo4j is unavailable
   private buildFallbackContext(issue: ExtendedIssue): Promise<BuildContextResult> {
+    console.log('Building fallback context for issue:', issue.id);
+    
+    // Create issue context file
+    const issueContextFile = {
+      path: 'issue-context.txt',
+      content: `Issue Title: ${issue.title}\nRepository: ${issue.context?.repository || 'Unknown'}\nDescription: ${issue.description || 'No description provided'}`,
+      relevance: 1.0
+    };
+    
+    // Create repository info file if available
+    const repoInfoFile = issue.context?.repository ? {
+      path: 'repository-info.txt',
+      content: `Repository: ${issue.context.repository}\nOwner: ${issue.context.githubMetadata?.owner || 'Unknown'}\nRepo: ${issue.context.githubMetadata?.repo || 'Unknown'}`,
+      relevance: 0.8
+    } : null;
+    
+    // Add code snippets as separate files if available
+    const snippetFiles = (issue.context?.codeSnippets || []).map((snippet, index) => ({
+      path: `code-snippet-${index + 1}.txt`,
+      content: snippet,
+      relevance: 0.9
+    }));
+    
+    // Build the files array with all available context
+    const files = [
+      issueContextFile,
+      ...(repoInfoFile ? [repoInfoFile] : []),
+      ...snippetFiles
+    ];
+    
+    console.log('Built fallback context with', files.length, 'files');
+    
     return Promise.resolve({
-      files: [],
+      files,
       relationships: [],
       metadata: {
-        error: 'Failed to build context',
-        timestamp: new Date().toISOString()
+        error: 'Failed to build context with Neo4j',
+        timestamp: new Date().toISOString(),
+        description: issue.description || 'No description provided',
+        repository: issue.context?.repository || 'Unknown',
+        issueUrl: issue.context?.issueUrl || 'Unknown',
+        labels: issue.context?.labels || [],
+        githubMetadata: issue.context?.githubMetadata || null
       },
       projectStructure: {
         hierarchy: {},
@@ -1431,6 +1516,49 @@ class KnowledgeGraphService {
     // 2. Parse it to get coverage data for the files
     // 3. Return structured coverage information
     return {};
+  }
+
+  /**
+   * Get files for a repository from the knowledge graph
+   * @param repository Repository in format "owner/repo"
+   * @returns Array of files with path and content
+   */
+  async getRepositoryFiles(repository: string): Promise<Array<{ path: string; content: string; relevance: number }>> {
+    console.log(`Getting files for repository: ${repository}`);
+    
+    if (!this.driver) {
+      console.warn('Neo4j driver not initialized');
+      return [];
+    }
+    
+    const session = this.driver.session();
+    
+    try {
+      // Query for files in the repository
+      const result = await session.run(
+        `MATCH (f:File) 
+         WHERE f.repository = $repository
+         RETURN f.path AS path, f.content AS content, f.size AS size
+         ORDER BY f.size DESC
+         LIMIT 10`,
+        { repository }
+      );
+      
+      const files = result.records.map(record => ({
+        path: record.get('path'),
+        content: record.get('content') || '',
+        // Calculate relevance based on file size (smaller files are more relevant)
+        relevance: 1 - Math.min(1, (record.get('size') || 0) / 100000)
+      }));
+      
+      console.log(`Found ${files.length} files for repository ${repository}`);
+      return files;
+    } catch (error) {
+      console.error(`Error getting files for repository ${repository}:`, error);
+      return [];
+    } finally {
+      await session.close();
+    }
   }
 }
 // Single export of the service instance

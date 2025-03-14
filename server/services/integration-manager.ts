@@ -32,12 +32,47 @@ export class IntegrationManager {
     this.github = new GitHubService();
   }
 
+  // Initialize services
+  async initialize() {
+    try {
+      console.log('Initializing IntegrationManager...');
+      
+      // Initialize GitHub service if it hasn't been set externally
+      if (!this.github.isInitialized()) {
+        console.log('GitHub client not initialized, initializing now...');
+        await this.github.initialize();
+        
+        if (!this.github.isInitialized()) {
+          console.error('Failed to initialize GitHub client');
+          // Don't throw, we'll continue without GitHub
+        } else {
+          console.log('GitHub client initialized successfully');
+        }
+      } else {
+        console.log('GitHub client already initialized');
+      }
+      
+      console.log('IntegrationManager initialization complete');
+      return true;
+    } catch (error) {
+      console.error('Failed to initialize IntegrationManager:', error);
+      // Don't throw, we'll continue with limited functionality
+      return false;
+    }
+  }
+
+  // Set an already initialized GitHub client
+  setGitHubClient(githubClient: GitHubService) {
+    this.github = githubClient;
+  }
+
   async processIssue(issue: Issue) {
     try {
       // Log complete issue object for debugging
       console.log('Processing issue with full context:', JSON.stringify({
         id: issue.id,
         title: issue.title,
+        description: (issue as any).description || 'No description provided',
         context: issue.context,
         hasStackTrace: !!issue.stacktrace,
       }, null, 2));
@@ -48,13 +83,14 @@ export class IntegrationManager {
         hasFiles: context.files.length > 0,
         fileCount: context.files.length,
         hasProjectStructure: !!context.projectStructure,
-        hasDependencies: !!context.dependencies
+        hasDependencies: !!context.dependencies,
+        hasDescription: !!context.metadata?.description
       });
 
       // Ensure code snippets are properly initialized
       let codeSnippets = issue.context?.codeSnippets || [];
       
-      // If no code snippets, try to fetch from GitHub repository
+      // If no code snippets, try to fetch from knowledge graph first, then GitHub repository
       if (codeSnippets.length === 0) {
         // Get repository info from either context.repository or githubMetadata
         const repoInfo = {
@@ -70,78 +106,105 @@ export class IntegrationManager {
         const repo = repoInfo.fromMetadata.repo || repoInfo.fromRepository[1];
 
         if (owner && repo) {
-          console.log('Attempting to fetch repository content for:', { owner, repo });
+          // First try to get files from knowledge graph
           try {
-            // First, try to get src or source directory
-            let repoContent = await this.github.getFileContents({
-              owner,
-              repo,
-              path: 'src'
-            }).catch(() => 
-              this.github.getFileContents({
-                owner,
-                repo,
-                path: 'source'
-              })
-            ).catch(() => 
-              this.github.getFileContents({
-                owner,
-                repo,
-                path: ''
-              })
-            );
-
-            console.log('Repository content retrieved:', {
-              isArray: Array.isArray(repoContent),
-              contentLength: Array.isArray(repoContent) ? repoContent.length : 'N/A',
-              type: typeof repoContent
-            });
-
-            if (Array.isArray(repoContent)) {
-              const mainFiles = repoContent
-                .filter((f: { path: string; type: string }) => {
-                  const isSourceFile = f.type === 'file' && (
-                    f.path.endsWith('.ts') || 
-                    f.path.endsWith('.tsx') || 
-                    f.path.endsWith('.js') || 
-                    f.path.endsWith('.jsx')
-                  );
-                  console.log('Filtering file:', { path: f.path, type: f.type, isSourceFile });
-                  return isSourceFile;
-                })
-                .slice(0, 3);
-
-              console.log('Found source files:', mainFiles);
-
-              // Fetch content for each file
-              for (const file of mainFiles) {
-                console.log('Attempting to fetch content for:', file.path);
-                try {
-                  const content = await this.github.getFileContents({
-                    owner,
-                    repo,
-                    path: file.path
-                  });
-                  if (typeof content === 'string') {
-                    console.log(`Successfully retrieved content for ${file.path} (${content.length} chars)`);
-                    codeSnippets.push(content);
-                  } else {
-                    console.warn(`Unexpected content type for ${file.path}:`, typeof content);
-                  }
-                } catch (fileError) {
-                  console.error(`Failed to fetch content for ${file.path}:`, fileError);
-                }
+            console.log('Attempting to fetch files from knowledge graph...');
+            const repoFiles = await knowledgeGraphService.getRepositoryFiles(`${owner}/${repo}`);
+            
+            if (repoFiles && repoFiles.length > 0) {
+              console.log(`Found ${repoFiles.length} files in knowledge graph`);
+              
+              // Take the top 3 most relevant files
+              const topFiles = repoFiles.slice(0, 3);
+              for (const file of topFiles) {
+                console.log(`Adding file from knowledge graph: ${file.path}`);
+                codeSnippets.push(file.content);
               }
             } else {
-              console.warn('Repository content is not an array:', typeof repoContent);
+              console.log('No files found in knowledge graph, checking if GitHub client is available');
+              
+              // Only try GitHub if the client is properly set and initialized
+              const isGitHubAvailable = !!this.github && this.github.isInitialized();
+              
+              if (isGitHubAvailable) {
+                console.log('GitHub client is available, falling back to GitHub API');
+                // Fall back to GitHub API if no files in knowledge graph
+                try {
+                  // First, try to get src or source directory
+                  let repoContent = await this.github.getFileContents({
+                    owner,
+                    repo,
+                    path: 'src'
+                  }).catch(() => 
+                    this.github.getFileContents({
+                      owner,
+                      repo,
+                      path: 'source'
+                    })
+                  ).catch(() => 
+                    this.github.getFileContents({
+                      owner,
+                      repo,
+                      path: ''
+                    })
+                  );
+
+                  console.log('Repository content retrieved:', {
+                    isArray: Array.isArray(repoContent),
+                    contentLength: Array.isArray(repoContent) ? repoContent.length : 'N/A',
+                    type: typeof repoContent
+                  });
+
+                  if (Array.isArray(repoContent)) {
+                    const mainFiles = repoContent
+                      .filter((f: { path: string; type: string }) => {
+                        const isSourceFile = f.type === 'file' && (
+                          f.path.endsWith('.ts') || 
+                          f.path.endsWith('.tsx') || 
+                          f.path.endsWith('.js') || 
+                          f.path.endsWith('.jsx')
+                        );
+                        console.log('Filtering file:', { path: f.path, type: f.type, isSourceFile });
+                        return isSourceFile;
+                      })
+                      .slice(0, 3);
+
+                    console.log('Found source files:', mainFiles);
+
+                    // Fetch content for each file
+                    for (const file of mainFiles) {
+                      console.log('Attempting to fetch content for:', file.path);
+                      try {
+                        const content = await this.github.getFileContents({
+                          owner,
+                          repo,
+                          path: file.path
+                        });
+                        if (typeof content === 'string') {
+                          console.log(`Successfully retrieved content for ${file.path} (${content.length} chars)`);
+                          codeSnippets.push(content);
+                        } else {
+                          console.warn(`Unexpected content type for ${file.path}:`, typeof content);
+                        }
+                      } catch (fileError) {
+                        console.error(`Failed to fetch content for ${file.path}:`, fileError);
+                      }
+                    }
+                  } else {
+                    console.warn('Repository content is not an array:', typeof repoContent);
+                  }
+                } catch (error) {
+                  console.error('Failed to fetch repository files:', {
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    owner,
+                    repo,
+                    stack: error instanceof Error ? error.stack : undefined
+                  });
+                }
+              }
             }
           } catch (error) {
-            console.error('Failed to fetch repository files:', {
-              error: error instanceof Error ? error.message : 'Unknown error',
-              owner,
-              repo,
-              stack: error instanceof Error ? error.stack : undefined
-            });
+            console.error('Failed to fetch files from knowledge graph:', error);
           }
         } else {
           console.warn('Missing repository information:', {

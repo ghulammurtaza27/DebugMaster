@@ -20,10 +20,20 @@ interface FileInfo {
   column: number;
 }
 
+// Add Issue interface extension
+interface ExtendedIssue extends Issue {
+  description?: string;
+}
+
+// Add missing method to AIService interface
+interface ExtendedAIService extends AIService {
+  extractRelevantFiles(text: string): Promise<Array<{ path: string }>>;
+}
+
 class KnowledgeGraphService {
   private driver: Driver | null = null;
   private session: Session | null = null;
-  private ai: AIService;
+  private ai: ExtendedAIService;
   private currentFilePath: string = '';
   private isNeo4jAvailable: boolean = true;
   private parser: any;
@@ -439,51 +449,97 @@ class KnowledgeGraphService {
     return files;
   }
 
-  async buildContext(issue: Issue) {
+  async buildContext(issue: ExtendedIssue) {
+    console.log('Building context for issue:', issue.id);
+    
+    const context = {
+      files: [] as string[],
+      relationships: [] as Array<{ source: string; relationship: string; target: string }>,
+      metadata: {} as Record<string, any>
+    };
+
     try {
-      // If Neo4j is not available, use a fallback approach
-      if (!this.isNeo4jAvailable || !this.session) {
-        console.log('Using fallback mode for knowledge graph context building');
-        return this.buildFallbackContext(issue);
-      }
-
-      const session = this.session; // Create a local reference that TypeScript can track
+      // 1. Extract files from stack trace
+      const stackTraceFiles = this.extractFilesFromStacktrace(issue.stacktrace || '');
       
-      // Original Neo4j implementation
-      // Create issue node
-      await session.run(`
-        CREATE (i:Issue {
-          id: $id,
-          title: $title,
-          status: $status,
-          stacktrace: $stacktrace
-        })
-      `, {
-        id: issue.id.toString(),
-        title: issue.title,
-        status: issue.status,
-        stacktrace: issue.stacktrace
-      });
+      // 2. Get files from issue description using AI
+      const mentionedFiles = await this.ai.extractRelevantFiles(issue.title + '\n' + (issue.description || ''));
+      
+      // 3. Combine all potential relevant files
+      const allFiles = [...stackTraceFiles, ...mentionedFiles];
+      
+      // 4. For each file, get its direct dependencies and dependents
+      const relatedFiles = new Set<string>();
+      for (const file of allFiles) {
+        // Add direct file
+        relatedFiles.add(file.path);
+        
+        // Get dependencies
+        const deps = await this.session?.run(`
+          MATCH (f:File {path: $path})-[r:IMPORTS|USES|EXTENDS|IMPLEMENTS]->(dep)
+          RETURN dep.path as path, type(r) as relationship
+        `, { path: file.path });
+        
+        deps?.records.forEach(record => {
+          relatedFiles.add(record.get('path'));
+          context.relationships.push({
+            source: file.path,
+            relationship: record.get('relationship'),
+            target: record.get('path')
+          });
+        });
 
-      // Extract and create file nodes from stacktrace
-      const files = this.extractFilesFromStacktrace(issue.stacktrace);
-      for (const file of files as FileInfo[]) {
-        await this.createFileNode(file);
-        await this.createRelationship('Issue', issue.id.toString(), 'File', file.path, 'AFFECTS');
+        // Get dependents
+        const dependents = await this.session?.run(`
+          MATCH (dep)-[r:IMPORTS|USES|EXTENDS|IMPLEMENTS]->(f:File {path: $path})
+          RETURN dep.path as path, type(r) as relationship
+        `, { path: file.path });
+
+        dependents?.records.forEach(record => {
+          relatedFiles.add(record.get('path'));
+          context.relationships.push({
+            source: record.get('path'),
+            relationship: record.get('relationship'),
+            target: file.path
+          });
+        });
       }
 
-      // Create relationships between files based on imports
-      await this.analyzeFileRelationships(files as FileInfo[]);
+      // 5. Get file contents with smart chunking
+      for (const filePath of Array.from(relatedFiles)) {
+        try {
+          const content = await this.readFileContent(filePath);
+          if (content) {
+            // Smart chunk the content if it's too large
+            const chunks = this.smartChunkContent(content);
+            context.files.push(...chunks.map(chunk => `File: ${filePath}\n${chunk}`));
+          }
+        } catch (error) {
+          console.warn(`Failed to read file ${filePath}:`, error);
+        }
+      }
 
-      // Return context for AI analysis
-      return {
-        files: await this.getRelatedFiles(issue.id.toString()),
-        relationships: await this.getFileRelationships(issue.id.toString())
+      // 6. Add test files if they exist
+      const testFiles = await this.findRelatedTests(Array.from(relatedFiles));
+      for (const testFile of testFiles) {
+        const content = await this.readFileContent(testFile);
+        if (content) {
+          context.files.push(`Test File: ${testFile}\n${content}`);
+        }
+      }
+
+      // 7. Store metadata about the context
+      context.metadata = {
+        totalFiles: relatedFiles.size,
+        stackTraceFiles: stackTraceFiles.length,
+        mentionedFiles: mentionedFiles.length,
+        testFiles: testFiles.length,
+        timestamp: new Date().toISOString()
       };
+
+      return context;
     } catch (error) {
-      console.error('Error building knowledge graph:', error);
-      // If Neo4j operations fail, fall back to the simplified approach
-      console.log('Falling back to simplified context building');
+      console.error('Error building context:', error);
       return this.buildFallbackContext(issue);
     }
   }
@@ -996,6 +1052,65 @@ class KnowledgeGraphService {
       files: filePaths,
       relationships: relationships
     };
+  }
+
+  private smartChunkContent(content: string): string[] {
+    const MAX_CHUNK_SIZE = 1000;
+    const chunks: string[] = [];
+    
+    // If content is small enough, return as is
+    if (content.length <= MAX_CHUNK_SIZE) {
+      return [content];
+    }
+
+    // Split by functions/classes first
+    const ast = this.parser.parse(content);
+    const declarations = this.parser.extractDeclarations(ast, content);
+
+    for (const decl of declarations) {
+      if (decl.content.length <= MAX_CHUNK_SIZE) {
+        chunks.push(decl.content);
+      } else {
+        // If declaration is too large, split by logical blocks
+        const subChunks = decl.content
+          .split(/}\n\s*\n/)
+          .filter((chunk: string) => chunk.trim().length > 0)
+          .map((chunk: string) => chunk + '}');
+        
+        chunks.push(...subChunks);
+      }
+    }
+
+    return chunks;
+  }
+
+  private async findRelatedTests(files: string[]): Promise<string[]> {
+    const testFiles: string[] = [];
+    
+    for (const file of files) {
+      const baseName = path.basename(file, path.extname(file));
+      const testPatterns = [
+        `${baseName}.test.ts`,
+        `${baseName}.test.tsx`,
+        `${baseName}.spec.ts`,
+        `${baseName}.spec.tsx`,
+        `__tests__/${baseName}.ts`,
+        `__tests__/${baseName}.tsx`
+      ];
+
+      for (const pattern of testPatterns) {
+        const testPath = path.join(path.dirname(file), pattern);
+        try {
+          await fs.access(testPath);
+          testFiles.push(testPath);
+        } catch {
+          // Test file doesn't exist with this pattern
+          continue;
+        }
+      }
+    }
+
+    return testFiles;
   }
 }
 // Single export of the service instance

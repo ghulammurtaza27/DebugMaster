@@ -73,7 +73,7 @@ export async function registerRoutes(app: Express) {
 
       // Test GitHub connection - using the service directly
       await githubService.initialize();
-      await githubService.testConnection(parsed.data.githubOwner, parsed.data.githubRepo);
+      await githubService.testConnection();
 
       const settings = await storage.saveSettings(parsed.data);
       res.json(settings);

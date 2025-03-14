@@ -1,5 +1,4 @@
-import { GoogleGenerativeAI, GenerativeModel, GenerationConfig } from '@google/generative-ai';
-import { storage } from '../storage';
+import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
 import { RateLimiter } from 'limiter';
 
 export interface AIAnalysisResult {
@@ -51,21 +50,44 @@ export class AIService {
     await this.limiter.removeTokens(1);
 
     try {
-      const prompt = `Analyze this bug:
-Issue: ${params.issueDescription}
-Stack Trace: ${params.stacktrace}
-Code Snippets:
-${params.codeSnippets.join('\n')}
-File Context:
-${params.fileContext.join('\n')}
+      // Organize context by relevance
+      const organizedContext = this.organizeContext(params);
+      
+      // Build a structured prompt
+      const prompt = `As a senior developer, analyze this bug with the following context:
 
-Provide a detailed analysis including:
-1. Root cause
-2. Severity (high/medium/low)
-3. Impacted components
-4. Suggested fix with specific code changes`;
+ISSUE DESCRIPTION:
+${params.issueDescription}
+
+STACK TRACE:
+${params.stacktrace}
+
+DIRECTLY RELEVANT CODE:
+${organizedContext.directlyRelevant.join('\n')}
+
+RELATED DEPENDENCIES:
+${organizedContext.dependencies.join('\n')}
+
+TEST CONTEXT:
+${organizedContext.tests.join('\n')}
+
+Please provide a detailed analysis including:
+1. Root cause analysis with specific line numbers and files
+2. Severity assessment (high/medium/low) with justification
+3. List of impacted components and their relationships
+4. Suggested fix with specific code changes, ensuring:
+   - All necessary imports are included
+   - Changes are minimal and focused
+   - Each change has a clear explanation
+   - Changes maintain existing code style
+   - No breaking changes to the API
+5. Potential side effects of the proposed fix
+6. Suggested tests to validate the fix
+
+Format the response in a structured way that can be parsed programmatically.`;
 
       const result = await this.model.generateContent(prompt);
+
       const response = await result.response;
       const text = response.text();
 
@@ -73,18 +95,7 @@ Provide a detailed analysis including:
       return this.parseAnalysisResponse(text);
     } catch (error) {
       console.error('AI analysis failed:', error);
-      
-      // Return a fallback analysis when the AI service fails
-      return {
-        rootCause: 'Analysis could not be completed due to AI service unavailability. The issue appears to be related to ' + 
-                  (params.stacktrace.includes('Neo4j') ? 'database connectivity' : 
-                   params.stacktrace.includes('TypeError') ? 'type errors' : 
-                   params.stacktrace.includes('ReferenceError') ? 'undefined references' : 
-                   'code execution errors'),
-        severity: 'medium',
-        impactedComponents: this.extractImpactedComponents(params.stacktrace, params.fileContext),
-        fix: undefined
-      };
+      return this.generateFallbackAnalysis(params);
     }
   }
 
@@ -395,6 +406,141 @@ Provide specific suggestions for:
     }
     
     return Array.from(components);
+  }
+
+  private organizeContext(params: {
+    stacktrace: string;
+    codeSnippets: string[];
+    fileContext: string[];
+    issueDescription: string;
+  }): {
+    directlyRelevant: string[];
+    dependencies: string[];
+    tests: string[];
+  } {
+    const organized = {
+      directlyRelevant: [] as string[],
+      dependencies: [] as string[],
+      tests: [] as string[]
+    };
+
+    // Extract file paths from stack trace
+    const stackTraceFiles = new Set(
+      (params.stacktrace.match(/at\s+.*?\((.*?):\d+:\d+\)/g) || [])
+        .map(line => line.match(/\((.*?):\d+:\d+\)/))?.[1]
+    );
+
+    // Organize file context
+    for (const context of params.fileContext) {
+      if (context.startsWith('Test File:')) {
+        organized.tests.push(context);
+      } else if (stackTraceFiles.has(context.split('\n')[0].replace('File: ', ''))) {
+        organized.directlyRelevant.push(context);
+      } else {
+        organized.dependencies.push(context);
+      }
+    }
+
+    // Add code snippets to directly relevant if they're not already included
+    for (const snippet of params.codeSnippets) {
+      if (!organized.directlyRelevant.some(ctx => ctx.includes(snippet))) {
+        organized.directlyRelevant.push(snippet);
+      }
+    }
+
+    return organized;
+  }
+
+  private generateFallbackAnalysis(params: {
+    stacktrace: string;
+    codeSnippets: string[];
+    fileContext: string[];
+    issueDescription: string;
+  }): AIAnalysisResult {
+    // Extract basic information from available data
+    const severity = this.determineSeverity(params.stacktrace);
+    const impactedFiles = this.extractImpactedFiles(params);
+    
+    return {
+      rootCause: this.inferRootCause(params),
+      severity,
+      impactedComponents: impactedFiles,
+      fix: undefined // No fix suggestion in fallback mode
+    };
+  }
+
+  private determineSeverity(stacktrace: string): 'high' | 'medium' | 'low' {
+    if (stacktrace.includes('Error: ENOENT') || 
+        stacktrace.includes('TypeError') || 
+        stacktrace.includes('ReferenceError')) {
+      return 'high';
+    }
+    if (stacktrace.includes('Warning') || 
+        stacktrace.includes('Deprecation')) {
+      return 'low';
+    }
+    return 'medium';
+  }
+
+  private inferRootCause(params: {
+    stacktrace: string;
+    issueDescription: string;
+  }): string {
+    const errorType = (params.stacktrace.match(/([A-Za-z]+Error):/) || [])[1];
+    const errorMessage = params.stacktrace.split('\n')[0];
+    return `${errorType || 'Unknown error'}: ${errorMessage || params.issueDescription}`;
+  }
+
+  private extractImpactedFiles(params: {
+    stacktrace: string;
+    codeSnippets: string[];
+    fileContext: string[];
+    issueDescription: string;
+  }): string[] {
+    const impactedFiles = new Set<string>();
+    
+    // Extract file paths from stack trace
+    const stackTraceFiles = new Set(
+      (params.stacktrace.match(/at\s+.*?\((.*?):\d+:\d+\)/g) || [])
+        .map(line => line.match(/\((.*?):\d+:\d+\)/))?.[1]
+    );
+
+    // Add directly relevant files
+    for (const file of params.fileContext) {
+      if (stackTraceFiles.has(file.split('\n')[0].replace('File: ', ''))) {
+        impactedFiles.add(file);
+      }
+    }
+
+    // Add code snippets as files
+    for (const snippet of params.codeSnippets) {
+      impactedFiles.add(snippet);
+    }
+
+    return Array.from(impactedFiles);
+  }
+
+  async extractRelevantFiles(text: string): Promise<Array<{ path: string }>> {
+    await this.limiter.removeTokens(1);
+
+    try {
+      const prompt = `Given this text, identify and extract any file paths or references to code files:
+${text}
+
+Return ONLY the file paths, one per line.`;
+
+      const result = await this.model.generateContent(prompt);
+      const response = await result.response;
+      const paths = response.text()
+        .split('\n')
+        .filter(line => line.trim().length > 0)
+        .map(path => ({ path: path.trim() }));
+
+      return paths;
+    } catch (error) {
+      console.error('Failed to extract file paths:', error);
+      return [];
+    }
   }
 }
 

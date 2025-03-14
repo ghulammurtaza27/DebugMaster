@@ -1,6 +1,14 @@
 import * as parser from "@babel/parser";
-import traverse from "@babel/traverse";
-import { Node, ImportDeclaration } from "@babel/types";
+// Import traverse properly for ES modules
+import traverseDefault from "@babel/traverse";
+// @ts-ignore
+const traverse = traverseDefault.default || traverseDefault;
+// Log traverse to debug
+console.log('traverse type:', typeof traverse);
+console.log('traverse is function:', typeof traverse === 'function');
+
+import type { NodePath } from "@babel/traverse";
+import { Node, ImportDeclaration, ClassDeclaration, FunctionDeclaration, Identifier } from "@babel/types";
 import { storage } from "../storage";
 import { InsertCodeNode, InsertCodeEdge } from "@shared/schema";
 import fs from "fs/promises";
@@ -49,7 +57,6 @@ interface BuildContextResult {
 
 class KnowledgeGraphService {
   private driver: Driver | null = null;
-  private session: Session | null = null;
   private ai: ExtendedAIService;
   private currentFilePath: string = '';
   private isNeo4jAvailable: boolean = true;
@@ -91,8 +98,14 @@ class KnowledgeGraphService {
           const declarations: { type: string; name: string; content: string }[] = [];
           
           try {
+            // Check if traverse is a function
+            if (typeof traverse !== 'function') {
+              console.error('traverse is not a function in extractDeclarations, type:', typeof traverse);
+              throw new Error('traverse is not a function in extractDeclarations');
+            }
+            
             traverse(ast, {
-              ClassDeclaration: (path: any) => {
+              ClassDeclaration: (path: NodePath<ClassDeclaration>) => {
                 if (path.node.id?.name) {
                   console.log(`Found class declaration: ${path.node.id.name}`);
                   declarations.push({
@@ -102,7 +115,7 @@ class KnowledgeGraphService {
                   });
                 }
               },
-              FunctionDeclaration: (path: any) => {
+              FunctionDeclaration: (path: NodePath<FunctionDeclaration>) => {
                 if (path.node.id?.name) {
                   console.log(`Found function declaration: ${path.node.id.name}`);
                   declarations.push({
@@ -136,9 +149,6 @@ class KnowledgeGraphService {
         // Verify connectivity
         await this.driver.verifyConnectivity();
         
-        // Create session
-        this.session = this.driver.session();
-        
         // Initialize constraints
         await this.initializeConstraints();
         
@@ -148,28 +158,28 @@ class KnowledgeGraphService {
         console.error('Failed to connect to Neo4j database:', error);
         this.isNeo4jAvailable = false;
         this.driver = null;
-        this.session = null;
     }
   }
 
   private async initializeConstraints() {
-    if (!this.session) {
-        throw new Error('Neo4j session not available');
+    if (!this.driver) {
+        throw new Error('Neo4j driver not available');
     }
     
+    const session = this.driver.session();
     try {
         // Create constraints for unique paths and IDs
-        await this.session.run(`
+        await session.run(`
             CREATE CONSTRAINT IF NOT EXISTS FOR (n:File)
             REQUIRE n.path IS UNIQUE
         `);
         
-        await this.session.run(`
+        await session.run(`
             CREATE CONSTRAINT IF NOT EXISTS FOR (n:Function)
             REQUIRE (n.path, n.name) IS UNIQUE
         `);
         
-        await this.session.run(`
+        await session.run(`
             CREATE CONSTRAINT IF NOT EXISTS FOR (n:Class)
             REQUIRE (n.path, n.name) IS UNIQUE
         `);
@@ -178,6 +188,8 @@ class KnowledgeGraphService {
     } catch (error) {
         console.error('Error creating Neo4j constraints:', error);
         throw error;
+    } finally {
+        await session.close();
     }
   }
 
@@ -214,7 +226,7 @@ class KnowledgeGraphService {
         console.log(`\nAnalyzing file: ${filePath}`);
         
         // Verify Neo4j connection first
-        if (!this.isNeo4jAvailable || !this.session) {
+        if (!this.isNeo4jAvailable || !this.driver) {
             console.warn('Neo4j is not available, falling back to SQL storage only');
         } else {
             console.log('Neo4j connection verified');
@@ -245,21 +257,28 @@ class KnowledgeGraphService {
         console.log('Creating file node...');
         try {
             // Create in Neo4j if available
-            if (this.isNeo4jAvailable && this.session) {
-                await this.session.run(`
-                    MERGE (f:File {path: $path})
-                    ON CREATE SET 
-                        f.name = $name,
-                        f.type = 'file',
-                        f.createdAt = timestamp()
-                    ON MATCH SET 
-                        f.updatedAt = timestamp()
-                    RETURN f
-                `, {
-                    path: filePath,
-                    name: path.basename(filePath)
-                });
-                console.log('Created file node in Neo4j');
+            if (this.isNeo4jAvailable && this.driver) {
+                // Create a new session for this operation
+                const session = this.driver.session();
+                try {
+                    await session.run(`
+                        MERGE (f:File {path: $path})
+                        ON CREATE SET 
+                            f.name = $name,
+                            f.type = 'file',
+                            f.createdAt = timestamp()
+                        ON MATCH SET 
+                            f.updatedAt = timestamp()
+                        RETURN f
+                    `, {
+                        path: filePath,
+                        name: path.basename(filePath)
+                    });
+                    console.log('Created file node in Neo4j');
+                } finally {
+                    // Always close the session
+                    await session.close();
+                }
             }
             
             // Create in SQL storage
@@ -282,24 +301,61 @@ class KnowledgeGraphService {
         
         // Extract and create nodes for declarations
         console.log('Extracting declarations...');
-        traverse(ast, {
-            FunctionDeclaration: (path) => {
-                const name = path.node.id?.name;
-                if (name) {
-                    this.createFunctionNode(filePath, name, content.slice(path.node.start!, path.node.end!));
-                }
-            },
-            ClassDeclaration: (path) => {
-                const name = path.node.id?.name;
-                if (name) {
-                    this.createClassNode(filePath, name, content.slice(path.node.start!, path.node.end!));
-                }
-            },
-            ImportDeclaration: (path) => {
-                const importPath = path.node.source.value;
-                this.processImportNode(filePath, importPath);
+        try {
+            // Use traverse with proper error handling
+            if (typeof traverse !== 'function') {
+                console.error('traverse is not a function, type:', typeof traverse);
+                throw new Error('traverse is not a function');
             }
-        });
+            
+            // Store declarations to process
+            const declarations: Array<{type: 'function' | 'class', name: string, content: string}> = [];
+            const imports: Array<{path: string}> = [];
+            
+            traverse(ast, {
+                FunctionDeclaration: (path: NodePath<FunctionDeclaration>) => {
+                    const name = path.node.id?.name;
+                    if (name) {
+                        declarations.push({
+                            type: 'function',
+                            name,
+                            content: content.slice(path.node.start!, path.node.end!)
+                        });
+                    }
+                },
+                ClassDeclaration: (path: NodePath<ClassDeclaration>) => {
+                    const name = path.node.id?.name;
+                    if (name) {
+                        declarations.push({
+                            type: 'class',
+                            name,
+                            content: content.slice(path.node.start!, path.node.end!)
+                        });
+                    }
+                },
+                ImportDeclaration: (path: NodePath<ImportDeclaration>) => {
+                    const importPath = path.node.source.value;
+                    imports.push({ path: importPath });
+                }
+            });
+            
+            // Process declarations
+            for (const decl of declarations) {
+                if (decl.type === 'function') {
+                    await this.createFunctionNode(filePath, decl.name, decl.content);
+                } else if (decl.type === 'class') {
+                    await this.createClassNode(filePath, decl.name, decl.content);
+                }
+            }
+            
+            // Process imports
+            for (const imp of imports) {
+                await this.processImportNode(filePath, imp.path);
+            }
+        } catch (traverseError) {
+            console.error('Error during traverse:', traverseError);
+            throw traverseError;
+        }
         
         console.log(`Completed analysis of file: ${filePath}\n`);
     } catch (error) {
@@ -314,25 +370,32 @@ class KnowledgeGraphService {
   private async createFunctionNode(filePath: string, name: string, content: string) {
     try {
         // Create in Neo4j if available
-        if (this.isNeo4jAvailable && this.session) {
-            await this.session.run(`
-                MATCH (f:File {path: $filePath})
-                MERGE (func:Function {path: $funcPath, name: $name})
-                ON CREATE SET 
-                    func.content = $content,
-                    func.createdAt = timestamp()
-                ON MATCH SET 
-                    func.content = $content,
-                    func.updatedAt = timestamp()
-                MERGE (f)-[r:CONTAINS]->(func)
-                RETURN func
-            `, {
-                filePath,
-                funcPath: `${filePath}#${name}`,
-                name,
-                content
-            });
-            console.log(`Created function node in Neo4j: ${name}`);
+        if (this.isNeo4jAvailable && this.driver) {
+            // Create a new session for this operation
+            const session = this.driver.session();
+            try {
+                await session.run(`
+                    MATCH (f:File {path: $filePath})
+                    MERGE (func:Function {path: $funcPath, name: $name})
+                    ON CREATE SET 
+                        func.content = $content,
+                        func.createdAt = timestamp()
+                    ON MATCH SET 
+                        func.content = $content,
+                        func.updatedAt = timestamp()
+                    MERGE (f)-[r:CONTAINS]->(func)
+                    RETURN func
+                `, {
+                    filePath,
+                    funcPath: `${filePath}#${name}`,
+                    name,
+                    content
+                });
+                console.log(`Created function node in Neo4j: ${name}`);
+            } finally {
+                // Always close the session
+                await session.close();
+            }
         }
         
         // Create in SQL storage
@@ -352,25 +415,32 @@ class KnowledgeGraphService {
   private async createClassNode(filePath: string, name: string, content: string) {
     try {
         // Create in Neo4j if available
-        if (this.isNeo4jAvailable && this.session) {
-            await this.session.run(`
-                MATCH (f:File {path: $filePath})
-                MERGE (c:Class {path: $classPath, name: $name})
-                ON CREATE SET 
-                    c.content = $content,
-                    c.createdAt = timestamp()
-                ON MATCH SET 
-                    c.content = $content,
-                    c.updatedAt = timestamp()
-                MERGE (f)-[r:CONTAINS]->(c)
-                RETURN c
-            `, {
-                filePath,
-                classPath: `${filePath}#${name}`,
-                name,
-                content
-            });
-            console.log(`Created class node in Neo4j: ${name}`);
+        if (this.isNeo4jAvailable && this.driver) {
+            // Create a new session for this operation
+            const session = this.driver.session();
+            try {
+                await session.run(`
+                    MATCH (f:File {path: $filePath})
+                    MERGE (c:Class {path: $classPath, name: $name})
+                    ON CREATE SET 
+                        c.content = $content,
+                        c.createdAt = timestamp()
+                    ON MATCH SET 
+                        c.content = $content,
+                        c.updatedAt = timestamp()
+                    MERGE (f)-[r:CONTAINS]->(c)
+                    RETURN c
+                `, {
+                    filePath,
+                    classPath: `${filePath}#${name}`,
+                    name,
+                    content
+                });
+                console.log(`Created class node in Neo4j: ${name}`);
+            } finally {
+                // Always close the session
+                await session.close();
+            }
         }
         
         // Create in SQL storage
@@ -392,18 +462,25 @@ class KnowledgeGraphService {
         const resolvedPath = this.resolveImportPath(importPath, path.dirname(filePath));
         
         // Create in Neo4j if available
-        if (this.isNeo4jAvailable && this.session) {
-            await this.session.run(`
-                MATCH (f:File {path: $filePath})
-                MERGE (i:File {path: $importPath})
-                MERGE (f)-[r:IMPORTS]->(i)
-                ON CREATE SET r.createdAt = timestamp()
-                RETURN i
-            `, {
-                filePath,
-                importPath: resolvedPath
-            });
-            console.log(`Created import relationship in Neo4j: ${filePath} -> ${resolvedPath}`);
+        if (this.isNeo4jAvailable && this.driver) {
+            // Create a new session for this operation
+            const session = this.driver.session();
+            try {
+                await session.run(`
+                    MATCH (f:File {path: $filePath})
+                    MERGE (i:File {path: $importPath})
+                    MERGE (f)-[r:IMPORTS]->(i)
+                    ON CREATE SET r.createdAt = timestamp()
+                    RETURN i
+                `, {
+                    filePath,
+                    importPath: resolvedPath
+                });
+                console.log(`Created import relationship in Neo4j: ${filePath} -> ${resolvedPath}`);
+            } finally {
+                // Always close the session
+                await session.close();
+            }
         }
         
         // Create in SQL storage
@@ -579,19 +656,20 @@ class KnowledgeGraphService {
       }
     }
 
-    return Array.from(files).map(path => ({ path }));
+    return Array.from(files).map(filePath => ({ path: filePath }));
   }
 
   private async createFileNode(file: FileInfo) {
-    if (!this.session) {
-        throw new Error('Neo4j session not available');
+    if (!this.driver) {
+        throw new Error('Neo4j driver not available');
     }
 
     try {
         console.log(`Creating/updating file node for path: ${file.path}`);
         
         // Create file node in Neo4j
-        const result = await this.session.run(`
+        const session = this.driver.session();
+        const result = await session.run(`
             MERGE (f:File { path: $path })
             ON CREATE SET 
                 f.lines = $line,
@@ -634,15 +712,16 @@ class KnowledgeGraphService {
     relationship: string,
     metadata: Record<string, any> = {}
   ) {
-    if (!this.session) {
-        throw new Error('Neo4j session not available');
+    if (!this.driver) {
+        throw new Error('Neo4j driver not available');
     }
 
     try {
         console.log(`Creating relationship: (${sourceType}:${sourceId})-[${relationship}]->(${targetType}:${targetId})`);
         
         // Create relationship in Neo4j
-        const result = await this.session.run(`
+        const session = this.driver.session();
+        const result = await session.run(`
             MATCH (source:${sourceType} { id: $sourceId })
             MATCH (target:${targetType} { path: $targetId })
             MERGE (source)-[r:${relationship}]->(target)
@@ -676,8 +755,8 @@ class KnowledgeGraphService {
   }
 
   private async analyzeFileRelationships(files: FileInfo[]) {
-    if (!this.session) {
-      throw new Error('Neo4j session not available');
+    if (!this.driver) {
+      throw new Error('Neo4j driver not available');
     }
     // Create relationships between files based on imports and dependencies
     for (const file of files) {
@@ -686,7 +765,8 @@ class KnowledgeGraphService {
       
       for (const importPath of imports) {
         await this.createFileNode({ path: importPath, line: 0, column: 0 });
-        await this.session.run(`
+        const session = this.driver.session();
+        await session.run(`
           MATCH (source:File { path: $sourcePath })
           MATCH (target:File { path: $targetPath })
           MERGE (source)-[r:IMPORTS]->(target)
@@ -715,12 +795,12 @@ class KnowledgeGraphService {
 
   async storeFix(issue: Issue, fix: any) {
     try {
-      if (!this.isNeo4jAvailable || !this.session) {
+      if (!this.isNeo4jAvailable || !this.driver) {
         console.log('Neo4j not available, skipping fix storage');
         return;
       }
 
-      const session = this.session; // Create a local reference that TypeScript can track
+      const session = this.driver.session();
       
       // Create fix node
       await session.run(`
@@ -765,12 +845,12 @@ class KnowledgeGraphService {
   }
 
   async getRelatedFiles(issueId: string) {
-    if (!this.isNeo4jAvailable || !this.session) {
+    if (!this.isNeo4jAvailable || !this.driver) {
       // Return empty array if Neo4j is not available
       return [];
     }
     
-    const result = await this.session.run(`
+    const result = await this.driver.session().run(`
       MATCH (i:Issue { id: $issueId })-[:AFFECTS]->(:File)<-[:IMPORTS*0..2]-(f:File)
       RETURN DISTINCT f.path as path
     `, { issueId });
@@ -779,13 +859,13 @@ class KnowledgeGraphService {
   }
 
   async getFileRelationships(issueId: string) {
-    if (!this.isNeo4jAvailable || !this.session) {
+    if (!this.isNeo4jAvailable || !this.driver) {
       console.log('Neo4j not available, returning empty relationships');
       return [];
     }
     
     try {
-      const session = this.session; // Create a local reference that TypeScript can track
+      const session = this.driver.session();
       const result = await session.run(`
         MATCH (i:Issue { id: $issueId })-[:AFFECTS]->(f:File)
         MATCH (f)-[r:IMPORTS|CONTAINS|CALLS]-(related:File)
@@ -805,17 +885,13 @@ class KnowledgeGraphService {
 
   async close() {
     try {
-      if (this.session) {
-        await this.session.close();
-        this.session = null;
-      }
-      if (this.driver) {
-        await this.driver.close();
-        this.driver = null;
-      }
-      console.log('Successfully closed Neo4j connections');
+        if (this.driver) {
+            await this.driver.close();
+            this.driver = null;
+        }
+        console.log('Successfully closed Neo4j connections');
     } catch (error) {
-      console.error('Error closing Neo4j connections:', error);
+        console.error('Error closing Neo4j connections:', error);
     }
   }
 

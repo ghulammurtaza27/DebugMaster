@@ -30,6 +30,23 @@ interface ExtendedAIService extends AIService {
   extractRelevantFiles(text: string): Promise<Array<{ path: string }>>;
 }
 
+interface BuildContextResult {
+  files: Array<{ path: string; content: string; relevance: number }>;
+  relationships: Array<{ source: string; relationship: string; target: string }>;
+  metadata: Record<string, any>;
+  projectStructure: {
+    hierarchy: Record<string, string[]>;
+    dependencies: Record<string, string[]>;
+    dependents: Record<string, string[]>;
+    testCoverage: Record<string, any>;
+  };
+  dependencies: {
+    dependencies: Record<string, string>;
+    devDependencies: Record<string, string>;
+    peerDependencies: Record<string, string>;
+  };
+}
+
 class KnowledgeGraphService {
   private driver: Driver | null = null;
   private session: Session | null = null;
@@ -449,91 +466,97 @@ class KnowledgeGraphService {
     return files;
   }
 
-  async buildContext(issue: ExtendedIssue) {
+  async buildContext(issue: ExtendedIssue): Promise<BuildContextResult> {
     console.log('Building context for issue:', issue.id);
     
-    const context = {
-      files: [] as string[],
-      relationships: [] as Array<{ source: string; relationship: string; target: string }>,
-      metadata: {} as Record<string, any>
+    const context: BuildContextResult = {
+      files: [],
+      relationships: [],
+      metadata: {},
+      projectStructure: {
+        hierarchy: {},
+        dependencies: {},
+        dependents: {},
+        testCoverage: {}
+      },
+      dependencies: {
+        dependencies: {},
+        devDependencies: {},
+        peerDependencies: {}
+      }
     };
 
     try {
-      // 1. Extract files from stack trace
+      // 1. Extract files from stack trace with more detail
       const stackTraceFiles = this.extractFilesFromStacktrace(issue.stacktrace || '');
       
-      // 2. Get files from issue description using AI
-      const mentionedFiles = await this.ai.extractRelevantFiles(issue.title + '\n' + (issue.description || ''));
+      // 2. Get files from issue description using AI with improved prompt
+      const mentionedFiles = await this.ai.extractRelevantFiles(
+        `${issue.title}\n${issue.description || ''}\n${issue.context?.codeSnippets?.join('\n') || ''}`
+      );
       
-      // 3. Combine all potential relevant files
-      const allFiles = [...stackTraceFiles, ...mentionedFiles];
+      // 3. Get package.json and configuration files
+      const configFiles = await this.getConfigurationFiles();
       
-      // 4. For each file, get its direct dependencies and dependents
-      const relatedFiles = new Set<string>();
-      for (const file of allFiles) {
-        // Add direct file
-        relatedFiles.add(file.path);
-        
-        // Get dependencies
-        const deps = await this.session?.run(`
-          MATCH (f:File {path: $path})-[r:IMPORTS|USES|EXTENDS|IMPLEMENTS]->(dep)
-          RETURN dep.path as path, type(r) as relationship
-        `, { path: file.path });
-        
-        deps?.records.forEach(record => {
-          relatedFiles.add(record.get('path'));
-          context.relationships.push({
-            source: file.path,
-            relationship: record.get('relationship'),
-            target: record.get('path')
-          });
-        });
+      // 4. Get all related files with smart prioritization
+      const allFiles = new Set([
+        ...stackTraceFiles.map(f => f.path),
+        ...mentionedFiles.map(f => f.path),
+        ...configFiles.map(f => f.path)
+      ]);
 
-        // Get dependents
-        const dependents = await this.session?.run(`
-          MATCH (dep)-[r:IMPORTS|USES|EXTENDS|IMPLEMENTS]->(f:File {path: $path})
-          RETURN dep.path as path, type(r) as relationship
-        `, { path: file.path });
+      // 5. Build dependency graph
+      const { dependencies, dependents } = await this.buildDependencyGraph(Array.from(allFiles));
+      
+      // 6. Get component hierarchy
+      const componentHierarchy = await this.buildComponentHierarchy(Array.from(allFiles));
 
-        dependents?.records.forEach(record => {
-          relatedFiles.add(record.get('path'));
-          context.relationships.push({
-            source: record.get('path'),
-            relationship: record.get('relationship'),
-            target: file.path
-          });
-        });
-      }
-
-      // 5. Get file contents with smart chunking
-      for (const filePath of Array.from(relatedFiles)) {
-        try {
-          const content = await this.readFileContent(filePath);
-          if (content) {
-            // Smart chunk the content if it's too large
-            const chunks = this.smartChunkContent(content);
-            context.files.push(...chunks.map(chunk => `File: ${filePath}\n${chunk}`));
-          }
-        } catch (error) {
-          console.warn(`Failed to read file ${filePath}:`, error);
-        }
-      }
-
-      // 6. Add test files if they exist
-      const testFiles = await this.findRelatedTests(Array.from(relatedFiles));
-      for (const testFile of testFiles) {
-        const content = await this.readFileContent(testFile);
+      // 7. Smart content extraction with priority
+      for (const file of Array.from(allFiles)) {
+        const content = await this.readFileContent(file);
         if (content) {
-          context.files.push(`Test File: ${testFile}\n${content}`);
+          const relevanceScore = this.calculateFileRelevance(file, {
+            isStackTrace: stackTraceFiles.some(f => f.path === file),
+            isMentioned: mentionedFiles.some(f => f.path === file),
+            isConfig: configFiles.some(f => f.path === file),
+            dependencyCount: (dependencies[file]?.length || 0),
+            dependentCount: (dependents[file]?.length || 0)
+          });
+
+          const chunks = this.smartChunkContent(content, {
+            maxChunks: relevanceScore > 0.8 ? 3 : 1,
+            preferredSize: 1000
+          });
+
+          context.files.push(...chunks.map(chunk => ({
+            path: file,
+            content: chunk,
+            relevance: relevanceScore
+          })));
         }
       }
 
-      // 7. Store metadata about the context
+      // 8. Add test coverage information
+      const testContext = await this.buildTestContext(Array.from(allFiles));
+      
+      // 9. Add project structure context
+      context.projectStructure = {
+        hierarchy: componentHierarchy,
+        dependencies,
+        dependents,
+        testCoverage: testContext.coverage
+      };
+
+      // 10. Add package dependencies
+      const packageInfo = await this.getPackageDependencies();
+      context.dependencies = packageInfo;
+
+      // Store metadata about the context
       context.metadata = {
-        totalFiles: relatedFiles.size,
+        totalFiles: allFiles.size,
         stackTraceFiles: stackTraceFiles.length,
         mentionedFiles: mentionedFiles.length,
-        testFiles: testFiles.length,
+        testFiles: testContext.files.length,
         timestamp: new Date().toISOString()
       };
 
@@ -544,20 +567,19 @@ class KnowledgeGraphService {
     }
   }
 
-  private extractFilesFromStacktrace(stacktrace: string): FileInfo[] {
-    const fileRegex = /at\s+(?:\w+\s+\()?([\/\w\-\.]+\.[jt]sx?):(\d+):(\d+)/g;
-    const files = new Set<FileInfo>();
+  private extractFilesFromStacktrace(stacktrace: string): Array<{ path: string }> {
+    const fileRegex = /\s+at\s+(?:\w+\s+\()?([^:)]+)(?::\d+:\d+)?/g;
+    const files = new Set<string>();
     let match;
 
     while ((match = fileRegex.exec(stacktrace)) !== null) {
-      files.add({
-        path: match[1],
-        line: parseInt(match[2]),
-        column: parseInt(match[3])
-      });
+      const filePath = match[1];
+      if (filePath && !filePath.includes('node_modules')) {
+        files.add(filePath);
+      }
     }
 
-    return Array.from(files);
+    return Array.from(files).map(path => ({ path }));
   }
 
   private async createFileNode(file: FileInfo) {
@@ -1029,88 +1051,246 @@ class KnowledgeGraphService {
   }
 
   // New method to provide fallback functionality when Neo4j is unavailable
-  private async buildFallbackContext(issue: Issue) {
-    console.log('Building fallback context for issue analysis');
-    
-    // Extract files from stacktrace
-    const files = this.extractFilesFromStacktrace(issue.stacktrace);
-    const filePaths = files.map(file => file.path);
-    
-    // Simple relationships based on file paths
-    const relationships = [];
-    
-    // If we have multiple files, create some basic relationships between them
-    for (let i = 0; i < filePaths.length - 1; i++) {
-      relationships.push({
-        source: filePaths[i],
-        relationship: 'RELATED_TO',
-        target: filePaths[i + 1]
-      });
-    }
-    
-    return {
-      files: filePaths,
-      relationships: relationships
-    };
+  private buildFallbackContext(issue: ExtendedIssue): Promise<BuildContextResult> {
+    return Promise.resolve({
+      files: [],
+      relationships: [],
+      metadata: {
+        error: 'Failed to build context',
+        timestamp: new Date().toISOString()
+      },
+      projectStructure: {
+        hierarchy: {},
+        dependencies: {},
+        dependents: {},
+        testCoverage: {}
+      },
+      dependencies: {
+        dependencies: {},
+        devDependencies: {},
+        peerDependencies: {}
+      }
+    });
   }
 
-  private smartChunkContent(content: string): string[] {
-    const MAX_CHUNK_SIZE = 1000;
-    const chunks: string[] = [];
+  private async findRelatedTests(files: string[]): Promise<Array<{ path: string; content: string; relevance: number }>> {
+    const testFiles: Array<{ path: string; content: string; relevance: number }> = [];
     
-    // If content is small enough, return as is
-    if (content.length <= MAX_CHUNK_SIZE) {
+    for (const file of files) {
+      // Convert source file path to potential test file path
+      const testPath = file.replace(/\.(ts|js|tsx|jsx)$/, '.test.$1');
+      
+      try {
+        const content = await this.readFileContent(testPath);
+        if (content) {
+          testFiles.push({
+            path: testPath,
+            content,
+            relevance: 0.7 // Tests are important but not as critical as source files
+          });
+        }
+      } catch (error) {
+        console.debug(`No test file found for ${file}`);
+      }
+    }
+    
+    return testFiles;
+  }
+
+  private smartChunkContent(content: string, options: { maxChunks: number; preferredSize: number } = { maxChunks: 1, preferredSize: 1000 }): string[] {
+    if (!content) return [];
+
+    // If content is smaller than preferred size, return as is
+    if (content.length <= options.preferredSize) {
       return [content];
     }
 
-    // Split by functions/classes first
-    const ast = this.parser.parse(content);
-    const declarations = this.parser.extractDeclarations(ast, content);
+    const chunks: string[] = [];
+    let remainingContent = content;
 
-    for (const decl of declarations) {
-      if (decl.content.length <= MAX_CHUNK_SIZE) {
-        chunks.push(decl.content);
-      } else {
-        // If declaration is too large, split by logical blocks
-        const subChunks = decl.content
-          .split(/}\n\s*\n/)
-          .filter((chunk: string) => chunk.trim().length > 0)
-          .map((chunk: string) => chunk + '}');
-        
-        chunks.push(...subChunks);
+    // Split content into chunks
+    while (remainingContent.length > 0 && chunks.length < options.maxChunks) {
+      // Find a good breaking point near the preferred size
+      let breakPoint = options.preferredSize;
+      
+      // Try to break at a newline
+      const newlineIndex = remainingContent.lastIndexOf('\n', options.preferredSize);
+      if (newlineIndex > 0) {
+        breakPoint = newlineIndex;
       }
+
+      // Add chunk
+      chunks.push(remainingContent.slice(0, breakPoint));
+      remainingContent = remainingContent.slice(breakPoint).trim();
+    }
+
+    // If there's remaining content and we haven't hit max chunks
+    if (remainingContent.length > 0 && chunks.length < options.maxChunks) {
+      chunks.push(remainingContent);
     }
 
     return chunks;
   }
 
-  private async findRelatedTests(files: string[]): Promise<string[]> {
-    const testFiles: string[] = [];
+  private async getConfigurationFiles(): Promise<Array<{ path: string; content: string; relevance: number }>> {
+    const configFiles = [
+      'package.json',
+      'tsconfig.json',
+      'vite.config.ts',
+      '.env',
+      '.eslintrc',
+      'tailwind.config.js'
+    ];
+    
+    const existingFiles: Array<{ path: string; content: string; relevance: number }> = [];
+    for (const file of configFiles) {
+      try {
+        const content = await this.readFileContent(file);
+        if (content) {
+          existingFiles.push({
+            path: file,
+            content,
+            relevance: 0.6 // Configuration files are important but not as critical as source files
+          });
+        }
+      } catch (error) {
+        console.debug(`Config file ${file} not found`);
+      }
+    }
+    return existingFiles;
+  }
+
+  private async buildDependencyGraph(files: string[]): Promise<{
+    dependencies: Record<string, string[]>;
+    dependents: Record<string, string[]>;
+  }> {
+    const dependencies: Record<string, string[]> = {};
+    const dependents: Record<string, string[]> = {};
     
     for (const file of files) {
-      const baseName = path.basename(file, path.extname(file));
-      const testPatterns = [
-        `${baseName}.test.ts`,
-        `${baseName}.test.tsx`,
-        `${baseName}.spec.ts`,
-        `${baseName}.spec.tsx`,
-        `__tests__/${baseName}.ts`,
-        `__tests__/${baseName}.tsx`
-      ];
+      try {
+        const content = await this.readFileContent(file);
+        if (!content) continue;
 
-      for (const pattern of testPatterns) {
-        const testPath = path.join(path.dirname(file), pattern);
-        try {
-          await fs.access(testPath);
-          testFiles.push(testPath);
-        } catch {
-          // Test file doesn't exist with this pattern
-          continue;
+        const imports = this.extractImports(content);
+        dependencies[file] = imports;
+        
+        for (const imp of imports) {
+          if (!dependents[imp]) dependents[imp] = [];
+          dependents[imp].push(file);
         }
+      } catch (error) {
+        console.warn(`Failed to build dependency graph for ${file}:`, error);
+      }
+    }
+    
+    return { dependencies, dependents };
+  }
+
+  private calculateFileRelevance(file: string, factors: {
+    isStackTrace: boolean;
+    isMentioned: boolean;
+    isConfig: boolean;
+    dependencyCount: number;
+    dependentCount: number;
+  }): number {
+    let score = 0;
+    
+    if (factors.isStackTrace) score += 0.4;
+    if (factors.isMentioned) score += 0.3;
+    if (factors.isConfig) score += 0.1;
+    
+    // Normalize dependency scores
+    const depScore = Math.min((factors.dependencyCount + factors.dependentCount) * 0.05, 0.2);
+    score += depScore;
+    
+    return Math.min(score, 1);
+  }
+
+  private async buildTestContext(files: string[]) {
+    const testFiles = await this.findRelatedTests(files);
+    const coverage = await this.getTestCoverage(files);
+    
+    return {
+      files: testFiles,
+      coverage: coverage || {}
+    };
+  }
+
+  private async buildComponentHierarchy(files: string[]): Promise<Record<string, string[]>> {
+    const hierarchy: Record<string, string[]> = {};
+    
+    for (const file of files) {
+      try {
+        const content = await this.readFileContent(file);
+        if (!content) continue;
+
+        // Extract component relationships (imports, extensions, implementations)
+        const relationships = await this.extractComponentRelationships(content);
+        hierarchy[file] = relationships;
+      } catch (error) {
+        console.warn(`Failed to build component hierarchy for ${file}:`, error);
       }
     }
 
-    return testFiles;
+    return hierarchy;
+  }
+
+  private async extractComponentRelationships(content: string): Promise<string[]> {
+    const relationships: string[] = [];
+    
+    // Extract class extensions
+    const extendsRegex = /class\s+\w+\s+extends\s+(\w+)/g;
+    let match;
+    while ((match = extendsRegex.exec(content)) !== null) {
+      relationships.push(match[1]);
+    }
+
+    // Extract interface implementations
+    const implementsRegex = /class\s+\w+(?:\s+extends\s+\w+)?\s+implements\s+([^{]+)/g;
+    while ((match = implementsRegex.exec(content)) !== null) {
+      const interfaces = match[1].split(',').map(i => i.trim());
+      relationships.push(...interfaces);
+    }
+
+    return relationships;
+  }
+
+  private async getPackageDependencies(): Promise<{
+    dependencies: Record<string, string>;
+    devDependencies: Record<string, string>;
+    peerDependencies: Record<string, string>;
+  }> {
+    try {
+      const content = await this.readFileContent('package.json');
+      if (!content) return {
+        dependencies: {},
+        devDependencies: {},
+        peerDependencies: {}
+      };
+
+      const packageJson = JSON.parse(content);
+      return {
+        dependencies: packageJson.dependencies || {},
+        devDependencies: packageJson.devDependencies || {},
+        peerDependencies: packageJson.peerDependencies || {}
+      };
+    } catch (error) {
+      console.warn('Failed to get package dependencies:', error);
+      return {
+        dependencies: {},
+        devDependencies: {},
+        peerDependencies: {}
+      };
+    }
+  }
+
+  private async getTestCoverage(files: string[]): Promise<Record<string, any>> {
+    // This is a placeholder. In a real implementation, you would:
+    // 1. Check if there's a coverage report file
+    // 2. Parse it to get coverage data for the files
+    // 3. Return structured coverage information
+    return {};
   }
 }
 // Single export of the service instance

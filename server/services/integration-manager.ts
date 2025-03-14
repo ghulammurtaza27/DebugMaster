@@ -1,7 +1,7 @@
 import { AIService } from './ai-service';
-import { knowledgeGraphService } from './knowledge-graph';
 import { GitHubService } from './github';
-import type { Issue } from '@shared/schema';
+import { Issue } from '@shared/schema';
+import { knowledgeGraphService } from './knowledge-graph';
 import type { AIAnalysisResult } from './ai-service';
 
 interface CodeChange {
@@ -15,6 +15,12 @@ interface CodeChange {
 interface FileChange {
   file: string;
   changes: CodeChange[];
+}
+
+interface FileContextItem {
+  path: string;
+  content: string;
+  relevance: number;
 }
 
 export class IntegrationManager {
@@ -31,12 +37,46 @@ export class IntegrationManager {
       // Use knowledgeGraphService instance instead of knowledgeGraph
       const context = await knowledgeGraphService.buildContext(issue);
 
+      // Ensure code snippets are properly initialized
+      const codeSnippets = issue.context?.codeSnippets || [];
+      if (context.files.length > 0 && codeSnippets.length === 0) {
+        // If no code snippets provided but we have files, use the most relevant file content
+        const relevantFiles = context.files
+          .sort((a, b) => (typeof a === 'object' && typeof b === 'object' ? b.relevance - a.relevance : 0))
+          .slice(0, 3);
+        
+        for (const file of relevantFiles) {
+          const content = typeof file === 'object' ? file.content : file;
+          codeSnippets.push(content);
+        }
+      }
+
+      // Convert context to the format expected by AI service
+      const fileContext: FileContextItem[] = context.files.map((file: { path: string; content: string; relevance: number } | string) => ({
+        path: typeof file === 'string' ? file.split('\n')[0].replace('File: ', '') : file.path,
+        content: typeof file === 'string' ? file.split('\n').slice(1).join('\n') : file.content,
+        relevance: typeof file === 'string' ? 0.5 : file.relevance
+      }));
+
       // Analyze with AI
       const analysis = await this.ai.analyzeBug({
-        stacktrace: issue.stacktrace,
-        codeSnippets: issue.context.codeSnippets,
-        fileContext: context.files,
-        issueDescription: issue.title
+        stacktrace: issue.stacktrace || '',
+        codeSnippets,
+        fileContext,
+        issueDescription: issue.title,
+        projectContext: {
+          projectStructure: context.projectStructure || {
+            hierarchy: {},
+            dependencies: {},
+            dependents: {},
+            testCoverage: {}
+          },
+          dependencies: context.dependencies || {
+            dependencies: {},
+            devDependencies: {},
+            peerDependencies: {}
+          }
+        }
       });
 
       if (!analysis.fix) {

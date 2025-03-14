@@ -487,9 +487,38 @@ export class GitHubService extends EventEmitter {
   }
 
   private extractCodeSnippets(body: string): string[] {
-    const codeBlockRegex = /```[\s\S]*?```/g;
-    return (body.match(codeBlockRegex) || [])
-      .map(block => block.replace(/```/g, '').trim());
+    const snippets: string[] = [];
+    
+    // Match GitHub-style code blocks with or without language specification
+    // Example: ```javascript or ``` or ```ts
+    const codeBlockRegex = /```(?:(\w+)\n)?([\s\S]*?)```/g;
+    let match;
+
+    while ((match = codeBlockRegex.exec(body)) !== null) {
+      const [_, language, code] = match;
+      const formattedCode = code.trim();
+      
+      if (formattedCode) {
+        // Include language information if available
+        const snippet = language 
+          ? `Language: ${language}\n${formattedCode}`
+          : formattedCode;
+        snippets.push(snippet);
+      }
+    }
+
+    // Also match inline code blocks
+    const inlineCodeRegex = /`([^`]+)`/g;
+    while ((match = inlineCodeRegex.exec(body)) !== null) {
+      const [_, code] = match;
+      const trimmedCode = code.trim();
+      if (trimmedCode && trimmedCode.includes('\n')) {
+        // Only include inline blocks that contain newlines (likely code)
+        snippets.push(trimmedCode);
+      }
+    }
+
+    return snippets;
   }
 
   async getFileContents(params: FileContentsParams): Promise<string | Array<{ name: string; path: string; type: string }>> {

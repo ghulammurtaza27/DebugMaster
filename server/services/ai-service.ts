@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
+import { GoogleGenerativeAI, GenerativeModel, Content, GenerateContentRequest } from '@google/generative-ai';
 import { RateLimiter } from 'limiter';
 
 export interface AIAnalysisResult {
@@ -17,6 +17,26 @@ export interface AIAnalysisResult {
       }>;
     }>;
   };
+}
+
+interface ProjectContext {
+  projectStructure: {
+    hierarchy: Record<string, string[]>;
+    dependencies: Record<string, string[]>;
+    dependents: Record<string, string[]>;
+    testCoverage: Record<string, any>;
+  };
+  dependencies: {
+    dependencies: Record<string, string>;
+    devDependencies: Record<string, string>;
+    peerDependencies: Record<string, string>;
+  };
+}
+
+interface FileContextItem {
+  path: string;
+  content: string;
+  relevance: number;
 }
 
 export interface AIValidationResult {
@@ -44,16 +64,31 @@ export class AIService {
   async analyzeBug(params: {
     stacktrace: string;
     codeSnippets: string[];
-    fileContext: string[];
+    fileContext: FileContextItem[];
     issueDescription: string;
+    projectContext?: ProjectContext;
   }): Promise<AIAnalysisResult> {
     await this.limiter.removeTokens(1);
 
     try {
-      // Organize context by relevance
-      const organizedContext = this.organizeContext(params);
+      const sortedFiles = params.fileContext
+        .sort((a, b) => b.relevance - a.relevance)
+        .map(f => `File: ${f.path}\n${f.content}`);
+
+      const projectContext = params.projectContext || {
+        projectStructure: {
+          hierarchy: {},
+          dependencies: {},
+          dependents: {},
+          testCoverage: {}
+        },
+        dependencies: {
+          dependencies: {},
+          devDependencies: {},
+          peerDependencies: {}
+        }
+      };
       
-      // Build a structured prompt
       const prompt = `As a senior developer, analyze this bug with the following context:
 
 ISSUE DESCRIPTION:
@@ -62,14 +97,20 @@ ${params.issueDescription}
 STACK TRACE:
 ${params.stacktrace}
 
+PROJECT STRUCTURE:
+${JSON.stringify(projectContext.projectStructure, null, 2)}
+
 DIRECTLY RELEVANT CODE:
-${organizedContext.directlyRelevant.join('\n')}
+${sortedFiles.slice(0, 3).join('\n\n')}
 
-RELATED DEPENDENCIES:
-${organizedContext.dependencies.join('\n')}
+PACKAGE DEPENDENCIES:
+${JSON.stringify(projectContext.dependencies, null, 2)}
 
-TEST CONTEXT:
-${organizedContext.tests.join('\n')}
+TEST COVERAGE:
+${JSON.stringify(projectContext.projectStructure.testCoverage, null, 2)}
+
+ADDITIONAL CONTEXT:
+${sortedFiles.slice(3).join('\n\n')}
 
 Please provide a detailed analysis including:
 1. Root cause analysis with specific line numbers and files
@@ -82,17 +123,10 @@ Please provide a detailed analysis including:
    - Changes maintain existing code style
    - No breaking changes to the API
 5. Potential side effects of the proposed fix
-6. Suggested tests to validate the fix
-
-Format the response in a structured way that can be parsed programmatically.`;
+6. Test cases to add or modify`;
 
       const result = await this.model.generateContent(prompt);
-
-      const response = await result.response;
-      const text = response.text();
-
-      // Parse the AI response into structured format
-      return this.parseAnalysisResponse(text);
+      return this.parseAnalysisResponse(result.response.text());
     } catch (error) {
       console.error('AI analysis failed:', error);
       return this.generateFallbackAnalysis(params);
@@ -454,18 +488,13 @@ Provide specific suggestions for:
   private generateFallbackAnalysis(params: {
     stacktrace: string;
     codeSnippets: string[];
-    fileContext: string[];
+    fileContext: FileContextItem[];
     issueDescription: string;
   }): AIAnalysisResult {
-    // Extract basic information from available data
-    const severity = this.determineSeverity(params.stacktrace);
-    const impactedFiles = this.extractImpactedFiles(params);
-    
     return {
-      rootCause: this.inferRootCause(params),
-      severity,
-      impactedComponents: impactedFiles,
-      fix: undefined // No fix suggestion in fallback mode
+      rootCause: 'Failed to analyze with AI',
+      severity: 'medium',
+      impactedComponents: [],
     };
   }
 

@@ -45,24 +45,27 @@ export class GitHubService extends EventEmitter {
     this.webhooks = null;
     this.webhookSecret = process.env.GITHUB_WEBHOOK_SECRET || "";
     this.useMockData = process.env.USE_MOCK_GITHUB === "true";
+
+    // Log configuration (without exposing the actual token)
+    console.log('GitHub Service Configuration:', {
+      hasToken: !!this.token,
+      tokenLength: this.token.length,
+      owner: this.owner,
+      repo: this.repo,
+      useMockData: this.useMockData
+    });
   }
 
   async initialize() {
     try {
-      // If we're already rate limited and the reset time hasn't passed, throw an error
-      if (this.rateLimitExceeded && Date.now() < this.rateLimitReset) {
-        const resetDate = new Date(this.rateLimitReset);
-        throw new Error(`GitHub API rate limit exceeded. Reset at ${resetDate.toLocaleTimeString()}`);
+      console.log('Initializing GitHub service...');
+      
+      if (!this.token && !this.useMockData) {
+        throw new Error('GitHub token not configured. Please check your environment variables or settings.');
       }
 
-      const settings = await storage.getSettings();
-      
-      this.token = settings?.githubToken || process.env.GITHUB_TOKEN || this.token;
-      this.owner = settings?.githubOwner || process.env.GITHUB_OWNER || this.owner;
-      this.repo = settings?.githubRepo || process.env.GITHUB_REPO || this.repo;
-
-      if (!this.token && !this.useMockData) {
-        throw new Error("GitHub token not configured");
+      if (!this.owner || !this.repo) {
+        throw new Error('GitHub owner and repo must be configured.');
       }
 
       // Skip actual GitHub API calls if using mock data
@@ -72,33 +75,36 @@ export class GitHubService extends EventEmitter {
         return;
       }
 
+      // Create Octokit instance
+      console.log('Creating Octokit instance...');
       this.octokit = new Octokit({
         auth: this.token
       });
 
+      // Verify authentication
       try {
+        console.log('Verifying GitHub authentication...');
         const { data: user } = await this.octokit.users.getAuthenticated();
         this.authenticatedUser = user.login;
-      } catch (error: any) {
-        // Check if this is a rate limit error
-        if (error.status === 403 && error.response?.headers?.['x-ratelimit-remaining'] === '0') {
-          this.rateLimitExceeded = true;
-          const resetTimestamp = parseInt(error.response.headers['x-ratelimit-reset']) * 1000;
-          this.rateLimitReset = resetTimestamp;
-          const resetDate = new Date(resetTimestamp);
-          throw new Error(`GitHub API rate limit exceeded. Reset at ${resetDate.toLocaleTimeString()}`);
+        console.log(`Successfully authenticated as ${this.authenticatedUser}`);
+      } catch (authError: any) {
+        console.error('GitHub authentication failed:', authError.message);
+        if (authError.status === 401) {
+          throw new Error('Invalid GitHub token. Please check your token and try again.');
         }
-        throw error;
+        throw authError;
       }
 
-      await this.testConnection(this.owner, this.repo);
-
-      // Only try to setup webhooks if we have a secret
+      // Initialize webhooks if secret is configured
       if (this.webhookSecret) {
-        await this.setupWebhooks();
+        this.webhooks = new Webhooks({
+          secret: this.webhookSecret
+        });
       }
+
+      console.log('GitHub service initialized successfully');
     } catch (error) {
-      console.error("GitHub initialization error:", error);
+      console.error('Failed to initialize GitHub service:', error);
       throw error;
     }
   }
@@ -287,15 +293,49 @@ export class GitHubService extends EventEmitter {
     }
   }
 
-  async testConnection(owner: string, repo: string) {
+  async testConnection(): Promise<boolean> {
     try {
-      const octokit = new Octokit({ auth: this.token });
-      await octokit.repos.get({
-        owner,
-        repo,
+      console.log('Testing GitHub connection...');
+
+      if (!this.octokit) {
+        throw new Error('GitHub client not initialized. Please initialize the service first.');
+      }
+
+      // Test repository access
+      console.log(`Testing access to repository ${this.owner}/${this.repo}...`);
+      try {
+        await this.octokit.repos.get({
+          owner: this.owner,
+          repo: this.repo,
+        });
+      } catch (repoError: any) {
+        if (repoError.status === 404) {
+          throw new Error(`Repository ${this.owner}/${this.repo} not found. Please check the repository name and owner.`);
+        } else if (repoError.status === 403) {
+          throw new Error(`Access denied to repository ${this.owner}/${this.repo}. Please check your token permissions.`);
+        }
+        throw repoError;
+      }
+
+      // Test rate limit status
+      const { data: rateLimit } = await this.octokit.rateLimit.get();
+      const remaining = rateLimit.resources.core.remaining;
+      const resetTime = new Date(rateLimit.resources.core.reset * 1000);
+
+      console.log('GitHub API Rate Limit Status:', {
+        remaining,
+        resetTime: resetTime.toLocaleString(),
       });
+
+      if (remaining < 100) {
+        console.warn(`Warning: Only ${remaining} GitHub API calls remaining. Rate limit resets at ${resetTime.toLocaleString()}`);
+      }
+
+      console.log('GitHub connection test successful');
+      return true;
     } catch (error) {
-      throw new Error("Could not connect to GitHub. Please check your credentials.");
+      console.error('GitHub connection test failed:', error);
+      throw error;
     }
   }
 

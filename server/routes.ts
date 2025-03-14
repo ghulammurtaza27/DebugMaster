@@ -6,10 +6,12 @@ import { githubService } from "./services/github";
 import { rateLimiter } from "./services/rate-limiter";
 import { insertIssueSchema, insertFixSchema, insertMetricSchema, insertSettingsSchema } from "@shared/schema";
 import { issueAnalyzer } from "./services/issue-analyzer";
-import { knowledgeGraphService } from "./services/knowledge-graph";
-
+import knowledgeGraphRouter from "./api/knowledge-graph";
 
 export async function registerRoutes(app: Express) {
+  // Mount knowledge graph routes
+  app.use('/api/knowledge-graph', knowledgeGraphRouter);
+
   // Issues
   app.get("/api/issues", async (req, res) => {
     const issues = await storage.getIssues();
@@ -66,11 +68,11 @@ export async function registerRoutes(app: Express) {
 
     try {
       // Test Sentry connection - using the service directly
-      await sentryService.initialize(parsed.data.sentryDsn, parsed.data.sentryToken);
+      await sentryService.initialize();
       await sentryService.testConnection();
 
       // Test GitHub connection - using the service directly
-      await githubService.initialize(parsed.data.githubToken);
+      await githubService.initialize();
       await githubService.testConnection(parsed.data.githubOwner, parsed.data.githubRepo);
 
       const settings = await storage.saveSettings(parsed.data);
@@ -131,26 +133,6 @@ export async function registerRoutes(app: Express) {
 
       const fix = await issueAnalyzer.analyzeIssue(issue);
       res.json(fix);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Knowledge Graph routes
-  app.get("/api/knowledge-graph/nodes", async (req, res) => {
-    const nodes = await storage.getCodeNodes();
-    res.json(nodes);
-  });
-
-  app.get("/api/knowledge-graph/edges", async (req, res) => {
-    const edges = await storage.getCodeEdges();
-    res.json(edges);
-  });
-
-  app.post("/api/knowledge-graph/analyze", async (req, res) => {
-    try {
-      await knowledgeGraphService.buildProjectGraph("./");
-      res.json({ message: "Analysis complete" });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }

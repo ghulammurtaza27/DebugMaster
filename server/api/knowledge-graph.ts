@@ -2,7 +2,6 @@ import { Router } from 'express';
 import { githubService } from '../services/github';
 import { knowledgeGraphService } from '../services/knowledge-graph';
 import { storage } from '../storage';
-import { pool } from '../db';
 
 const router = Router();
 
@@ -56,42 +55,64 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Analyze the codebase and update the knowledge graph
+// Get edges
+router.get('/edges', async (req, res) => {
+  try {
+    const edges = await storage.getCodeEdges();
+    res.json(edges);
+  } catch (error) {
+    console.error('Error fetching edges:', error);
+    res.status(500).json({ error: 'Failed to fetch edges' });
+  }
+});
+
+// Analyze repository
 router.post('/analyze', async (req, res) => {
   try {
-    const settings = await storage.getSettings();
-    if (!settings) {
-      return res.status(400).json({ error: 'GitHub settings not configured' });
-    }
-
-    try {
-      // Initialize GitHub service
-      await githubService.initialize();
-    } catch (error: any) {
-      if (error.message && error.message.includes('rate limit')) {
-        return res.status(429).json({ 
-          error: error.message,
-          rateLimitExceeded: true
-        });
-      }
-      throw error;
-    }
-
-    // Build knowledge graph
-    await knowledgeGraphService.analyzeRepository(settings.githubOwner, settings.githubRepo);
-
-    res.json({ message: 'Analysis complete' });
-  } catch (error: any) {
-    console.error('Error analyzing codebase:', error);
+    const owner = process.env.GITHUB_OWNER;
+    const repo = process.env.GITHUB_REPO;
+    const token = process.env.GITHUB_TOKEN;
     
-    if (error.message && error.message.includes('rate limit')) {
-      return res.status(429).json({ 
+    console.log('GitHub Configuration:', {
+      hasToken: !!token,
+      tokenLength: token?.length || 0,
+      owner,
+      repo,
+      envKeys: Object.keys(process.env).filter(key => key.startsWith('GITHUB_'))
+    });
+    
+    if (!owner || !repo) {
+      throw new Error('GitHub owner and repo must be configured');
+    }
+
+    if (!token) {
+      throw new Error('GitHub token not found in environment variables. Please check your .env file and server configuration.');
+    }
+
+    // Initialize GitHub service with token from environment
+    console.log('Initializing GitHub service...');
+    await githubService.initialize();
+    
+    // Test GitHub connection (no parameters needed as they're set in the service)
+    console.log('Testing GitHub connection...');
+    await githubService.testConnection();
+    
+    console.log(`Starting analysis of ${owner}/${repo}`);
+    await knowledgeGraphService.analyzeRepository(owner, repo);
+    res.json({ message: 'Analysis complete' });
+  } catch (error) {
+    console.error('Error analyzing repository:', error);
+    if (error instanceof Error) {
+      res.status(500).json({ 
         error: error.message,
-        rateLimitExceeded: true
+        details: 'Failed to analyze repository. Please check GitHub token permissions and repository access.'
+      });
+    } else {
+      res.status(500).json({ 
+        error: 'Failed to analyze repository',
+        details: 'An unexpected error occurred during repository analysis.'
       });
     }
-    
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to analyze codebase' });
   }
 });
 

@@ -1,23 +1,33 @@
-import express, { type Request, Response, NextFunction } from "express";
-import { registerRoutes } from "./routes";
-import { setupVite, serveStatic, log } from "./vite";
-import { setupAuth } from "./auth";
-import 'dotenv/config';
-// or
+// Load environment variables first
 import * as dotenv from 'dotenv';
-import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GitHubService } from "./services/github";
-import knowledgeGraphRouter from './api/knowledge-graph';
-import codebaseChatRouter from './api/codebase-chat';
-import { runMigrations } from './db/migrations';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Load env file from project root
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+import express, { type Request, Response, NextFunction } from "express";
+import { registerRoutes } from "./routes";
+import { setupVite, serveStatic, log } from "./vite";
+import { setupAuth } from "./auth";
+import cors from 'cors';
+import knowledgeGraphRouter from './api/knowledge-graph';
+import codebaseChatRouter from './api/codebase-chat';
+import { runMigrations } from './db/migrations';
+import { GitHubService } from "./services/github";
+
+// Add environment variable validation
+const requiredEnvVars = ['GITHUB_TOKEN', 'GITHUB_OWNER', 'GITHUB_REPO'];
+const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+
+if (missingEnvVars.length > 0) {
+  console.error('Missing required environment variables:', missingEnvVars);
+  console.error('Please check your .env file and ensure all required variables are set.');
+  process.exit(1);
+}
 
 console.log('DATABASE_URL from index:', process.env.DATABASE_URL);
 

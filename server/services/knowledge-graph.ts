@@ -20,7 +20,7 @@ interface FileInfo {
   column: number;
 }
 
-export class KnowledgeGraphService {
+class KnowledgeGraphService {
   private driver: Driver | null = null;
   private session: Session | null = null;
   private ai: AIService;
@@ -32,22 +32,13 @@ export class KnowledgeGraphService {
   constructor(storage: IStorage) {
     console.log('Initializing KnowledgeGraphService...');
     this.storage = storage;
+    this.ai = new AIService();
     
     const uri = process.env.NEO4J_URI || 'neo4j://localhost:7687';
     const user = process.env.NEO4J_USER || 'neo4j';
-    const password = process.env.NEO4J_PASSWORD || 'password';
+    const password = process.env.NEO4J_PASSWORD || 'debug123';
 
-    try {
-      this.driver = neo4j.driver(uri, neo4j.auth.basic(user, password));
-      this.session = this.driver.session();
-      this.isNeo4jAvailable = true;
-      console.log('Successfully connected to Neo4j');
-    } catch (error) {
-      console.warn('Failed to connect to Neo4j database. Using fallback mode.', error);
-      this.isNeo4jAvailable = false;
-    }
-    
-    this.ai = new AIService();
+    this.initializeNeo4j(uri, user, password);
 
     try {
       console.log('Setting up Babel parser...');
@@ -110,6 +101,59 @@ export class KnowledgeGraphService {
     }
   }
 
+  private async initializeNeo4j(uri: string, user: string, password: string) {
+    try {
+        console.log('Connecting to Neo4j database...');
+        this.driver = neo4j.driver(uri, neo4j.auth.basic(user, password));
+        
+        // Verify connectivity
+        await this.driver.verifyConnectivity();
+        
+        // Create session
+        this.session = this.driver.session();
+        
+        // Initialize constraints
+        await this.initializeConstraints();
+        
+        this.isNeo4jAvailable = true;
+        console.log('Successfully connected to Neo4j and initialized constraints');
+    } catch (error) {
+        console.error('Failed to connect to Neo4j database:', error);
+        this.isNeo4jAvailable = false;
+        this.driver = null;
+        this.session = null;
+    }
+  }
+
+  private async initializeConstraints() {
+    if (!this.session) {
+        throw new Error('Neo4j session not available');
+    }
+    
+    try {
+        // Create constraints for unique paths and IDs
+        await this.session.run(`
+            CREATE CONSTRAINT IF NOT EXISTS FOR (n:File)
+            REQUIRE n.path IS UNIQUE
+        `);
+        
+        await this.session.run(`
+            CREATE CONSTRAINT IF NOT EXISTS FOR (n:Function)
+            REQUIRE (n.path, n.name) IS UNIQUE
+        `);
+        
+        await this.session.run(`
+            CREATE CONSTRAINT IF NOT EXISTS FOR (n:Class)
+            REQUIRE (n.path, n.name) IS UNIQUE
+        `);
+        
+        console.log('Successfully created Neo4j constraints');
+    } catch (error) {
+        console.error('Error creating Neo4j constraints:', error);
+        throw error;
+    }
+  }
+
   private async clearExistingGraph() {
     try {
       console.log('Clearing existing graph data...');
@@ -140,146 +184,226 @@ export class KnowledgeGraphService {
 
   async analyzeFile(filePath: string, owner?: string, repo?: string): Promise<void> {
     try {
-      console.log(`\nAnalyzing file: ${filePath}`);
-      
-      let content: string;
-      if (owner && repo) {
-        // Get content from GitHub
-        console.log('Fetching file content from GitHub...');
-        const githubContent = await githubService.getFileContents({
-          owner,
-          repo,
-          path: filePath
+        console.log(`\nAnalyzing file: ${filePath}`);
+        
+        // Verify Neo4j connection first
+        if (!this.isNeo4jAvailable || !this.session) {
+            console.warn('Neo4j is not available, falling back to SQL storage only');
+        } else {
+            console.log('Neo4j connection verified');
+        }
+        
+        let content: string;
+        if (owner && repo) {
+            // Get content from GitHub
+            console.log('Fetching file content from GitHub...');
+            const githubContent = await githubService.getFileContents({
+                owner,
+                repo,
+                path: filePath
+            });
+            
+            if (typeof githubContent !== 'string') {
+                throw new Error('Expected file content but got directory listing');
+            }
+            content = githubContent;
+        } else {
+            // Read from local filesystem
+            content = await fs.readFile(filePath, 'utf8');
+        }
+        
+        console.log(`Successfully read file content (${content.length} bytes)`);
+        
+        // Create initial file node
+        console.log('Creating file node...');
+        try {
+            // Create in Neo4j if available
+            if (this.isNeo4jAvailable && this.session) {
+                await this.session.run(`
+                    MERGE (f:File {path: $path})
+                    ON CREATE SET 
+                        f.name = $name,
+                        f.type = 'file',
+                        f.createdAt = timestamp()
+                    ON MATCH SET 
+                        f.updatedAt = timestamp()
+                    RETURN f
+                `, {
+                    path: filePath,
+                    name: path.basename(filePath)
+                });
+                console.log('Created file node in Neo4j');
+            }
+            
+            // Create in SQL storage
+            const fileNode = await this.storage.createCodeNode({
+                path: filePath,
+                type: 'file',
+                name: path.basename(filePath),
+                content: content
+            });
+            console.log(`Created file node with ID: ${fileNode.id}`);
+        } catch (dbError) {
+            console.error('Failed to create file node:', dbError);
+            throw dbError;
+        }
+        
+        // Parse the file
+        console.log('Parsing file content...');
+        const ast = this.parser.parse(content);
+        console.log('Successfully parsed file content');
+        
+        // Extract and create nodes for declarations
+        console.log('Extracting declarations...');
+        traverse(ast, {
+            FunctionDeclaration: (path) => {
+                const name = path.node.id?.name;
+                if (name) {
+                    this.createFunctionNode(filePath, name, content.slice(path.node.start!, path.node.end!));
+                }
+            },
+            ClassDeclaration: (path) => {
+                const name = path.node.id?.name;
+                if (name) {
+                    this.createClassNode(filePath, name, content.slice(path.node.start!, path.node.end!));
+                }
+            },
+            ImportDeclaration: (path) => {
+                const importPath = path.node.source.value;
+                this.processImportNode(filePath, importPath);
+            }
         });
         
-        if (typeof githubContent !== 'string') {
-          throw new Error('Expected file content but got directory listing');
+        console.log(`Completed analysis of file: ${filePath}\n`);
+    } catch (error) {
+        console.error(`Error analyzing file ${filePath}:`, error);
+        if (error instanceof Error) {
+            console.error('Stack trace:', error.stack);
         }
-        content = githubContent;
-      } else {
-        // Read from local filesystem
-        content = await fs.readFile(filePath, 'utf8');
-      }
-      
-      console.log(`Successfully read file content (${content.length} bytes)`);
-      
-      // Create initial file node
-      console.log('Creating file node...');
-      try {
-        const fileNode = await this.storage.createCodeNode({
-          path: filePath,
-          type: 'file',
-          name: path.basename(filePath),
-          content: content
+        throw error;
+    }
+  }
+
+  private async createFunctionNode(filePath: string, name: string, content: string) {
+    try {
+        // Create in Neo4j if available
+        if (this.isNeo4jAvailable && this.session) {
+            await this.session.run(`
+                MATCH (f:File {path: $filePath})
+                MERGE (func:Function {path: $funcPath, name: $name})
+                ON CREATE SET 
+                    func.content = $content,
+                    func.createdAt = timestamp()
+                ON MATCH SET 
+                    func.content = $content,
+                    func.updatedAt = timestamp()
+                MERGE (f)-[r:CONTAINS]->(func)
+                RETURN func
+            `, {
+                filePath,
+                funcPath: `${filePath}#${name}`,
+                name,
+                content
+            });
+            console.log(`Created function node in Neo4j: ${name}`);
+        }
+        
+        // Create in SQL storage
+        await this.storage.createCodeNode({
+            path: `${filePath}#${name}`,
+            type: 'function',
+            name,
+            content
         });
-        console.log(`Created file node with ID: ${fileNode.id}`);
-      } catch (dbError) {
-        console.error('Failed to create file node in database:', dbError);
-        throw dbError;
-      }
-      
-      // Parse the file
-      console.log('Parsing file content...');
-      const ast = this.parser.parse(content);
-      console.log('Successfully parsed file content');
-      
-      // Extract and create nodes for declarations
-      console.log('Extracting declarations...');
-      const declarations = this.parser.extractDeclarations(ast, content);
-      console.log(`Found ${declarations.length} declarations`);
-      
-      for (const decl of declarations) {
-        console.log(`Creating node for declaration: ${decl.name} (${decl.type})`);
-        try {
-          const node = await this.storage.createCodeNode({
-            path: filePath,
-            type: decl.type,
-            name: decl.name,
-            content: decl.content
-          });
-          console.log(`Created declaration node with ID: ${node.id}`);
-        } catch (declError) {
-          console.error(`Error creating node for declaration ${decl.name}:`, declError);
-          // Continue with other declarations even if one fails
+        console.log(`Created function node in SQL: ${name}`);
+    } catch (error) {
+        console.error(`Error creating function node ${name}:`, error);
+        throw error;
+    }
+  }
+
+  private async createClassNode(filePath: string, name: string, content: string) {
+    try {
+        // Create in Neo4j if available
+        if (this.isNeo4jAvailable && this.session) {
+            await this.session.run(`
+                MATCH (f:File {path: $filePath})
+                MERGE (c:Class {path: $classPath, name: $name})
+                ON CREATE SET 
+                    c.content = $content,
+                    c.createdAt = timestamp()
+                ON MATCH SET 
+                    c.content = $content,
+                    c.updatedAt = timestamp()
+                MERGE (f)-[r:CONTAINS]->(c)
+                RETURN c
+            `, {
+                filePath,
+                classPath: `${filePath}#${name}`,
+                name,
+                content
+            });
+            console.log(`Created class node in Neo4j: ${name}`);
         }
-      }
-      
-      console.log(`Completed analysis of file: ${filePath}\n`);
+        
+        // Create in SQL storage
+        await this.storage.createCodeNode({
+            path: `${filePath}#${name}`,
+            type: 'class',
+            name,
+            content
+        });
+        console.log(`Created class node in SQL: ${name}`);
     } catch (error) {
-      console.error(`Error analyzing file ${filePath}:`, error);
-      if (error instanceof Error) {
-        console.error('Stack trace:', error.stack);
-      }
-      throw error;
+        console.error(`Error creating class node ${name}:`, error);
+        throw error;
     }
   }
 
-  private async processImport(fileNodeId: number, resolvedPath: string): Promise<void> {
+  private async processImportNode(filePath: string, importPath: string) {
     try {
-      const importNode = await storage.createCodeNode({
-        path: resolvedPath,
-        type: 'file',
-        name: path.basename(resolvedPath),
-        content: '' // Don't store content for imported files
-      });
-      console.log(`Created import node with ID: ${importNode.id}`);
-
-      await storage.createCodeEdge({
-        sourceId: fileNodeId,
-        targetId: importNode.id,
-        type: 'imports',
-        metadata: { importType: 'file' }
-      });
-      console.log(`Created edge: ${fileNodeId} imports ${importNode.id}`);
+        const resolvedPath = this.resolveImportPath(importPath, path.dirname(filePath));
+        
+        // Create in Neo4j if available
+        if (this.isNeo4jAvailable && this.session) {
+            await this.session.run(`
+                MATCH (f:File {path: $filePath})
+                MERGE (i:File {path: $importPath})
+                MERGE (f)-[r:IMPORTS]->(i)
+                ON CREATE SET r.createdAt = timestamp()
+                RETURN i
+            `, {
+                filePath,
+                importPath: resolvedPath
+            });
+            console.log(`Created import relationship in Neo4j: ${filePath} -> ${resolvedPath}`);
+        }
+        
+        // Create in SQL storage
+        const sourceNode = await this.storage.createCodeNode({
+            path: filePath,
+            type: 'file',
+            name: path.basename(filePath),
+            content: ''
+        });
+        
+        const targetNode = await this.storage.createCodeNode({
+            path: resolvedPath,
+            type: 'file',
+            name: path.basename(resolvedPath),
+            content: ''
+        });
+        
+        await this.storage.createCodeEdge({
+            sourceId: sourceNode.id,
+            targetId: targetNode.id,
+            type: 'imports',
+            metadata: {}
+        });
+        console.log(`Created import relationship in SQL: ${filePath} -> ${resolvedPath}`);
     } catch (error) {
-      console.error(`Error processing import ${resolvedPath}:`, error);
-      throw error; // Propagate the error up
-    }
-  }
-
-  private async processClass(fileNodeId: number, className: string, content: string): Promise<void> {
-    try {
-      const classNode = await storage.createCodeNode({
-        path: `${this.currentFilePath}#${className}`,
-        type: 'class',
-        name: className,
-        content
-      });
-      console.log(`Created class node with ID: ${classNode.id}`);
-
-      await storage.createCodeEdge({
-        sourceId: fileNodeId,
-        targetId: classNode.id,
-        type: 'contains',
-        metadata: { containsType: 'class' }
-      });
-      console.log(`Created edge: ${fileNodeId} contains ${classNode.id}`);
-    } catch (error) {
-      console.error(`Error processing class ${className}:`, error);
-      throw error; // Propagate the error up
-    }
-  }
-
-  private async processFunction(fileNodeId: number, functionName: string, content: string): Promise<void> {
-    try {
-      const functionNode = await storage.createCodeNode({
-        path: `${this.currentFilePath}#${functionName}`,
-        type: 'function',
-        name: functionName,
-        content
-      });
-      console.log(`Created function node with ID: ${functionNode.id}`);
-
-      await storage.createCodeEdge({
-        sourceId: fileNodeId,
-        targetId: functionNode.id,
-        type: 'contains',
-        metadata: { containsType: 'function' }
-      });
-      console.log(`Created edge: ${fileNodeId} contains ${functionNode.id}`);
-    } catch (error) {
-      console.error(`Error processing function ${functionName}:`, error);
-      throw error; // Propagate the error up
+        console.error(`Error processing import ${importPath}:`, error);
+        throw error;
     }
   }
 
@@ -382,13 +506,46 @@ export class KnowledgeGraphService {
 
   private async createFileNode(file: FileInfo) {
     if (!this.session) {
-      throw new Error('Neo4j session not available');
+        throw new Error('Neo4j session not available');
     }
-    await this.session.run(`
-      MERGE (f:File { path: $path })
-      ON CREATE SET f.lines = $line, f.lastAccessed = timestamp()
-      ON MATCH SET f.lastAccessed = timestamp()
-    `, file);
+
+    try {
+        console.log(`Creating/updating file node for path: ${file.path}`);
+        
+        // Create file node in Neo4j
+        const result = await this.session.run(`
+            MERGE (f:File { path: $path })
+            ON CREATE SET 
+                f.lines = $line,
+                f.column = $column,
+                f.createdAt = timestamp(),
+                f.lastAccessed = timestamp()
+            ON MATCH SET 
+                f.lastAccessed = timestamp(),
+                f.lines = $line,
+                f.column = $column
+            RETURN f
+        `, {
+            path: file.path,
+            line: file.line || 0,
+            column: file.column || 0
+        });
+
+        console.log(`Successfully created/updated file node in Neo4j: ${file.path}`);
+        
+        // Also create in SQL storage for redundancy
+        await this.storage.createCodeNode({
+            path: file.path,
+            type: 'file',
+            name: path.basename(file.path),
+            content: ''  // Don't store content for now
+        });
+        
+        return result.records[0].get('f').properties;
+    } catch (error) {
+        console.error(`Error creating file node for ${file.path}:`, error);
+        throw error;
+    }
   }
 
   private async createRelationship(
@@ -396,17 +553,48 @@ export class KnowledgeGraphService {
     sourceId: string,
     targetType: string,
     targetId: string,
-    relationship: string
+    relationship: string,
+    metadata: Record<string, any> = {}
   ) {
     if (!this.session) {
-      throw new Error('Neo4j session not available');
+        throw new Error('Neo4j session not available');
     }
-    await this.session.run(`
-      MATCH (source:${sourceType} { id: $sourceId })
-      MATCH (target:${targetType} { path: $targetId })
-      MERGE (source)-[r:${relationship}]->(target)
-      ON CREATE SET r.created = timestamp()
-    `, { sourceId, targetId });
+
+    try {
+        console.log(`Creating relationship: (${sourceType}:${sourceId})-[${relationship}]->(${targetType}:${targetId})`);
+        
+        // Create relationship in Neo4j
+        const result = await this.session.run(`
+            MATCH (source:${sourceType} { id: $sourceId })
+            MATCH (target:${targetType} { path: $targetId })
+            MERGE (source)-[r:${relationship}]->(target)
+            ON CREATE SET 
+                r.created = timestamp(),
+                r += $metadata
+            ON MATCH SET 
+                r += $metadata
+            RETURN r
+        `, { 
+            sourceId,
+            targetId,
+            metadata
+        });
+
+        console.log('Successfully created relationship in Neo4j');
+        
+        // Also create in SQL storage for redundancy
+        await this.storage.createCodeEdge({
+            sourceId: parseInt(sourceId),
+            targetId: parseInt(targetId),
+            type: relationship,
+            metadata
+        });
+        
+        return result.records[0].get('r').properties;
+    } catch (error) {
+        console.error('Error creating relationship:', error);
+        throw error;
+    }
   }
 
   private async analyzeFileRelationships(files: FileInfo[]) {
@@ -557,11 +745,17 @@ export class KnowledgeGraphService {
     try {
       console.log(`Starting repository analysis for ${owner}/${repo}`);
       
+      // Verify GitHub service is available
+      if (!githubService) {
+        throw new Error('GitHub service not available');
+      }
+
       // Clear existing graph data
       await this.clearExistingGraph();
       console.log('Cleared existing graph data');
       
       // Get all files from the repository
+      console.log('Fetching repository files...');
       const files = await this.getAllRepositoryFiles(owner, repo);
       console.log(`Found ${files.length} files to analyze`);
 
@@ -570,6 +764,9 @@ export class KnowledgeGraphService {
       
       // Process files in smaller batches
       const batchSize = 10;
+      let successfulFiles = 0;
+      let failedFiles = 0;
+
       for (let i = 0; i < files.length; i += batchSize) {
         const batch = files.slice(i, i + batchSize);
         console.log(`\nProcessing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(files.length/batchSize)}`);
@@ -585,17 +782,32 @@ export class KnowledgeGraphService {
           try {
             console.log(`\nAttempting to analyze file ${i + batch.indexOf(file) + 1}/${files.length}: ${file.path}`);
             console.log('Fetching file contents...');
-            const content = await githubService.getFileContents({
-              owner,
-              repo,
-              path: file.path
-            });
+            
+            // Add retry logic for GitHub API calls
+            let content;
+            let retries = 3;
+            while (retries > 0) {
+              try {
+                content = await githubService.getFileContents({
+                  owner,
+                  repo,
+                  path: file.path
+                });
+                break;
+              } catch (apiError) {
+                retries--;
+                if (retries === 0) throw apiError;
+                console.log(`Retrying file fetch (${retries} attempts remaining)...`);
+                await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s between retries
+              }
+            }
 
             if (typeof content === 'string') {
               console.log(`Retrieved content for ${file.path} (${content.length} characters)`);
               console.log('Starting file analysis...');
               await this.analyzeFile(file.path, owner, repo);
               processedFiles.add(file.path);
+              successfulFiles++;
               
               // Log the current state after each file
               const nodes = await storage.getCodeNodes();
@@ -611,6 +823,7 @@ export class KnowledgeGraphService {
               console.warn(`Skipping ${file.path}: Expected file content but got directory listing`);
             }
           } catch (error) {
+            failedFiles++;
             console.error(`Error analyzing file ${file.path}:`, error);
             if (error instanceof Error) {
               console.error('Error stack:', error.stack);
@@ -623,6 +836,7 @@ export class KnowledgeGraphService {
         await new Promise(resolve => setTimeout(resolve, 1000));
         
         console.log(`Progress: ${Math.min((i + batchSize), files.length)}/${files.length} files processed`);
+        console.log(`Success: ${successfulFiles}, Failed: ${failedFiles}`);
       }
 
       // Final verification
@@ -632,6 +846,7 @@ export class KnowledgeGraphService {
         acc[node.type] = (acc[node.type] || 0) + 1;
         return acc;
       }, {} as Record<string, number>));
+      console.log(`Analysis complete. Successfully processed ${successfulFiles} files, failed to process ${failedFiles} files`);
       
       return true;
     } catch (error) {
@@ -783,5 +998,5 @@ export class KnowledgeGraphService {
     };
   }
 }
-
+// Single export of the service instance
 export const knowledgeGraphService = new KnowledgeGraphService(storage);

@@ -33,7 +33,7 @@ export class AIService {
 
   constructor() {
     const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || '');
-    this.model = genAI.getGenerativeModel({ model: 'gemini-flash-1.5' });
+    this.model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
     
     // Rate limit to 10 requests per minute
     this.limiter = new RateLimiter({

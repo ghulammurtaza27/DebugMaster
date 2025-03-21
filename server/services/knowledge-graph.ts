@@ -26,6 +26,9 @@ interface FileInfo {
   path: string;
   line: number;
   column: number;
+  repository?: string;
+  owner?: string;
+  repo?: string;
 }
 
 // Add Issue interface extension
@@ -41,18 +44,48 @@ interface ExtendedAIService extends AIService {
 interface BuildContextResult {
   files: Array<{ path: string; content: string; relevance: number }>;
   relationships: Array<{ source: string; relationship: string; target: string }>;
-  metadata: Record<string, any>;
+  metadata: {
+    totalFiles: number;
+    stackTraceFiles: number;
+    mentionedFiles: number;
+    testFiles: number;
+    timestamp: string;
+    description: string;
+    repository: string;
+    issueUrl: string;
+    labels: string[];
+    githubMetadata: Record<string, unknown> | null;
+  };
   projectStructure: {
     hierarchy: Record<string, string[]>;
     dependencies: Record<string, string[]>;
     dependents: Record<string, string[]>;
-    testCoverage: Record<string, any>;
+    testCoverage: Record<string, unknown>;
   };
   dependencies: {
     dependencies: Record<string, string>;
     devDependencies: Record<string, string>;
     peerDependencies: Record<string, string>;
   };
+}
+
+interface TestContext {
+  files: Array<{ path: string; content: string; relevance: number }>;
+  coverage: Record<string, unknown>;
+}
+
+interface TestResult {
+  coverage: Record<string, unknown>;
+  files: Array<{ path: string; content: string; relevance: number }>;
+}
+
+interface NodeTypes {
+  [key: string]: number;
+}
+
+interface DependencyGraph {
+  dependencies: Map<string, string[]>;
+  dependents: Map<string, string[]>;
 }
 
 class KnowledgeGraphService {
@@ -266,13 +299,22 @@ class KnowledgeGraphService {
                         ON CREATE SET 
                             f.name = $name,
                             f.type = 'file',
-                            f.createdAt = timestamp()
+                            f.createdAt = timestamp(),
+                            f.repository = $repository,
+                            f.owner = $owner,
+                            f.repo = $repo
                         ON MATCH SET 
-                            f.updatedAt = timestamp()
+                            f.updatedAt = timestamp(),
+                            f.repository = $repository,
+                            f.owner = $owner,
+                            f.repo = $repo
                         RETURN f
                     `, {
                         path: filePath,
-                        name: path.basename(filePath)
+                        name: path.basename(filePath),
+                        repository: owner && repo ? `${owner}/${repo}` : null,
+                        owner: owner || null,
+                        repo: repo || null
                     });
                     console.log('Created file node in Neo4j');
                 } finally {
@@ -546,10 +588,26 @@ class KnowledgeGraphService {
   async buildContext(issue: ExtendedIssue): Promise<BuildContextResult> {
     console.log('Building context for issue:', issue.id);
     
+    // Handle feature requests differently
+    if (this.isFeatureRequest(issue)) {
+      return this.handleFeatureRequest(issue);
+    }
+    
     const context: BuildContextResult = {
       files: [],
       relationships: [],
-      metadata: {},
+      metadata: {
+        totalFiles: 0,
+        stackTraceFiles: 0,
+        mentionedFiles: 0,
+        testFiles: 0,
+        timestamp: new Date().toISOString(),
+        description: issue.description || 'No description provided',
+        repository: issue.context?.repository || 'Unknown',
+        issueUrl: issue.context?.issueUrl || 'Unknown',
+        labels: issue.context?.labels || [],
+        githubMetadata: issue.context?.githubMetadata || null
+      },
       projectStructure: {
         hierarchy: {},
         dependencies: {},
@@ -564,40 +622,72 @@ class KnowledgeGraphService {
     };
 
     try {
-      // 1. Extract files from stack trace with more detail
+      // 1. Extract files from stack trace with more detail and validation
       const stackTraceFiles = this.extractFilesFromStacktrace(issue.stacktrace || '');
+      console.log(`Extracted ${stackTraceFiles.length} files from stack trace`);
       
-      // 2. Get files from issue description using AI with improved prompt
+      // 2. Get files from issue description using AI with improved prompt and validation
       const mentionedFiles = await this.ai.extractRelevantFiles(
         `${issue.title}\n${issue.description || ''}\n${issue.context?.codeSnippets?.join('\n') || ''}`
-      );
+      ).catch(error => {
+        console.warn('Failed to extract files from issue description:', error);
+        return [];
+      });
+      console.log(`Extracted ${mentionedFiles.length} files from issue description`);
       
-      // 3. Get package.json and configuration files
-      const configFiles = await this.getConfigurationFiles();
+      // 3. Get package.json and configuration files with validation
+      const configFiles = await this.getConfigurationFiles().catch(error => {
+        console.warn('Failed to get configuration files:', error);
+        return [];
+      });
+      console.log(`Found ${configFiles.length} configuration files`);
       
-      // 4. Get all related files with smart prioritization
+      // 4. Get all related files with smart prioritization and deduplication
       const allFiles = new Set([
         ...stackTraceFiles.map(f => f.path),
         ...mentionedFiles.map(f => f.path),
         ...configFiles.map(f => f.path)
       ]);
+      console.log(`Total unique files to process: ${allFiles.size}`);
 
-      // 5. Build dependency graph
-      const { dependencies, dependents } = await this.buildDependencyGraph(Array.from(allFiles));
+      // 5. Build dependency graph with error handling
+      let dependencies: Map<string, string[]> = new Map();
+      let dependents: Map<string, string[]> = new Map();
+      try {
+        const graph = await this.buildDependencyGraph(Array.from(allFiles));
+        dependencies = graph.dependencies;
+        dependents = graph.dependents;
+      } catch (error) {
+        console.warn('Failed to build dependency graph:', error);
+      }
       
-      // 6. Get component hierarchy
-      const componentHierarchy = await this.buildComponentHierarchy(Array.from(allFiles));
+      // 6. Get component hierarchy with error handling
+      let componentHierarchy = {};
+      try {
+        componentHierarchy = await this.buildComponentHierarchy(Array.from(allFiles));
+      } catch (error) {
+        console.warn('Failed to build component hierarchy:', error);
+      }
 
-      // 7. Smart content extraction with priority
+      // 7. Smart content extraction with priority and validation
+      const processedFiles = new Set<string>();
       for (const file of Array.from(allFiles)) {
-        const content = await this.readFileContent(file);
-        if (content) {
+        if (processedFiles.has(file)) continue;
+        processedFiles.add(file);
+
+        try {
+          const content = await this.readFileContent(file);
+          if (!content) {
+            console.warn(`No content found for file: ${file}`);
+            continue;
+          }
+
           const relevanceScore = this.calculateFileRelevance(file, {
             isStackTrace: stackTraceFiles.some(f => f.path === file),
             isMentioned: mentionedFiles.some(f => f.path === file),
             isConfig: configFiles.some(f => f.path === file),
-            dependencyCount: (dependencies[file]?.length || 0),
-            dependentCount: (dependents[file]?.length || 0)
+            dependencyCount: dependencies.get(file)?.length || 0,
+            dependentCount: dependents.get(file)?.length || 0
           });
 
           const chunks = this.smartChunkContent(content, {
@@ -610,22 +700,43 @@ class KnowledgeGraphService {
             content: chunk,
             relevance: relevanceScore
           })));
+        } catch (error) {
+          console.warn(`Failed to process file ${file}:`, error);
         }
       }
 
-      // 8. Add test coverage information
-      const testContext = await this.buildTestContext(Array.from(allFiles));
+      // 8. Add test coverage information with error handling
+      let testContext: { coverage: Record<string, unknown>; files: Array<{ path: string; content: string; relevance: number }> } = { coverage: {}, files: [] };
+      try {
+        testContext = await this.buildTestContext(Array.from(allFiles));
+      } catch (error) {
+        console.warn('Failed to build test context:', error);
+      }
       
       // 9. Add project structure context
-      context.projectStructure = {
+      const depsRecord = Object.fromEntries(dependencies) as Record<string, string[]>;
+      const dependentsRecord = Object.fromEntries(dependents) as Record<string, string[]>;
+
+      const projectStructure = {
         hierarchy: componentHierarchy,
-        dependencies,
-        dependents,
+        dependencies: depsRecord,
+        dependents: dependentsRecord,
         testCoverage: testContext.coverage
       };
 
-      // 10. Add package dependencies
-      const packageInfo = await this.getPackageDependencies();
+      context.projectStructure = projectStructure;
+
+      // 10. Add package dependencies with error handling
+      let packageInfo = {
+        dependencies: {},
+        devDependencies: {},
+        peerDependencies: {}
+      };
+      try {
+        packageInfo = await this.getPackageDependencies();
+      } catch (error) {
+        console.warn('Failed to get package dependencies:', error);
+      }
       context.dependencies = packageInfo;
 
       // Store metadata about the context
@@ -645,45 +756,14 @@ class KnowledgeGraphService {
       // If no files were found, add some default context
       if (context.files.length === 0) {
         console.log('No files found, adding default context');
-        
-        // Create issue context file
-        const issueContextFile = {
-          path: 'issue-context.txt',
-          content: `Issue Title: ${issue.title}\nRepository: ${issue.context?.repository || 'Unknown'}\nDescription: ${issue.description || 'No description provided'}`,
-          relevance: 1.0
-        };
-        
-        context.files.push(issueContextFile);
-        console.log('Added issue context file:', issueContextFile.path);
-        
-        // Create repository info file if available
-        if (issue.context?.repository) {
-          const repoInfoFile = {
-            path: 'repository-info.txt',
-            content: `Repository: ${issue.context.repository}\nOwner: ${issue.context.githubMetadata?.owner || 'Unknown'}\nRepo: ${issue.context.githubMetadata?.repo || 'Unknown'}`,
-            relevance: 0.8
-          };
-          
-          context.files.push(repoInfoFile);
-          console.log('Added repository info file:', repoInfoFile.path);
-        }
-        
-        // Add code snippets as separate files if available
-        if (issue.context?.codeSnippets && issue.context.codeSnippets.length > 0) {
-          issue.context.codeSnippets.forEach((snippet, index) => {
-            const snippetFile = {
-              path: `code-snippet-${index + 1}.txt`,
-              content: snippet,
-              relevance: 0.9
-            };
-            
-            context.files.push(snippetFile);
-            console.log(`Added code snippet file: code-snippet-${index + 1}.txt`);
-          });
-        }
-        
-        console.log('Added default context files:', context.files.map(file => file.path));
+        context.files.push(...this.buildDefaultContext(issue));
       }
+
+      console.log('Context building completed successfully', {
+        totalFiles: context.files.length,
+        hasProjectStructure: Object.keys(context.projectStructure.hierarchy).length > 0,
+        hasDependencies: Object.keys(context.dependencies.dependencies).length > 0
+      });
 
       return context;
     } catch (error) {
@@ -723,16 +803,25 @@ class KnowledgeGraphService {
                 f.lines = $line,
                 f.column = $column,
                 f.createdAt = timestamp(),
-                f.lastAccessed = timestamp()
+                f.lastAccessed = timestamp(),
+                f.repository = $repository,
+                f.owner = $owner,
+                f.repo = $repo
             ON MATCH SET 
                 f.lastAccessed = timestamp(),
                 f.lines = $line,
-                f.column = $column
+                f.column = $column,
+                f.repository = $repository,
+                f.owner = $owner,
+                f.repo = $repo
             RETURN f
         `, {
             path: file.path,
             line: file.line || 0,
-            column: file.column || 0
+            column: file.column || 0,
+            repository: file.repository || null,
+            owner: file.owner || null,
+            repo: file.repo || null
         });
 
         console.log(`Successfully created/updated file node in Neo4j: ${file.path}`);
@@ -1011,11 +1100,22 @@ class KnowledgeGraphService {
     try {
       console.log(`Starting repository analysis for ${owner}/${repo}`);
       
-      // Verify GitHub service is available
-      if (!githubService) {
-        throw new Error('GitHub service not available');
+      // Get settings from database
+      const settings = await storage.getSettings();
+      if (!settings) {
+        throw new Error('GitHub settings not configured');
       }
 
+      // Use settings from database
+      owner = settings.githubOwner;
+      repo = settings.githubRepo;
+      
+      // Ensure GitHub service is initialized
+      if (!githubService.isInitialized()) {
+        console.log('GitHub service not initialized, initializing now...');
+        await githubService.initialize();
+      }
+      
       // Clear existing graph data
       await this.clearExistingGraph();
       console.log('Cleared existing graph data');
@@ -1081,10 +1181,10 @@ class KnowledgeGraphService {
               console.log(`After analyzing ${file.path}:`);
               console.log(`- Total nodes in database: ${nodes.length}`);
               console.log(`- Total edges in database: ${edges.length}`);
-              console.log(`- Node types:`, nodes.reduce((acc, node) => {
+              console.log(`- Node types:`, nodes.reduce((acc: NodeTypes, node) => {
                 acc[node.type] = (acc[node.type] || 0) + 1;
                 return acc;
-              }, {} as Record<string, number>));
+              }, {} as NodeTypes));
             } else {
               console.warn(`Skipping ${file.path}: Expected file content but got directory listing`);
             }
@@ -1276,7 +1376,10 @@ class KnowledgeGraphService {
       files,
       relationships: [],
       metadata: {
-        error: 'Failed to build context with Neo4j',
+        totalFiles: files.length,
+        stackTraceFiles: 0,
+        mentionedFiles: 0,
+        testFiles: 0,
         timestamp: new Date().toISOString(),
         description: issue.description || 'No description provided',
         repository: issue.context?.repository || 'Unknown',
@@ -1285,15 +1388,15 @@ class KnowledgeGraphService {
         githubMetadata: issue.context?.githubMetadata || null
       },
       projectStructure: {
-        hierarchy: {},
-        dependencies: {},
-        dependents: {},
-        testCoverage: {}
+        hierarchy: {} as Record<string, string[]>,
+        dependencies: {} as Record<string, string[]>,
+        dependents: {} as Record<string, string[]>,
+        testCoverage: {} as Record<string, unknown>
       },
       dependencies: {
-        dependencies: {},
-        devDependencies: {},
-        peerDependencies: {}
+        dependencies: {} as Record<string, string>,
+        devDependencies: {} as Record<string, string>,
+        peerDependencies: {} as Record<string, string>
       }
     });
   }
@@ -1385,12 +1488,11 @@ class KnowledgeGraphService {
     return existingFiles;
   }
 
-  private async buildDependencyGraph(files: string[]): Promise<{
-    dependencies: Record<string, string[]>;
-    dependents: Record<string, string[]>;
-  }> {
-    const dependencies: Record<string, string[]> = {};
-    const dependents: Record<string, string[]> = {};
+  private async buildDependencyGraph(files: string[]): Promise<DependencyGraph> {
+    const graph: DependencyGraph = {
+      dependencies: new Map<string, string[]>(),
+      dependents: new Map<string, string[]>()
+    };
     
     for (const file of files) {
       try {
@@ -1398,18 +1500,19 @@ class KnowledgeGraphService {
         if (!content) continue;
 
         const imports = this.extractImports(content);
-        dependencies[file] = imports;
+        graph.dependencies.set(file, imports);
         
         for (const imp of imports) {
-          if (!dependents[imp]) dependents[imp] = [];
-          dependents[imp].push(file);
+          const currentDependents = graph.dependents.get(imp) || [];
+          currentDependents.push(file);
+          graph.dependents.set(imp, currentDependents);
         }
       } catch (error) {
         console.warn(`Failed to build dependency graph for ${file}:`, error);
       }
     }
     
-    return { dependencies, dependents };
+    return graph;
   }
 
   private calculateFileRelevance(file: string, factors: {
@@ -1432,14 +1535,17 @@ class KnowledgeGraphService {
     return Math.min(score, 1);
   }
 
-  private async buildTestContext(files: string[]) {
-    const testFiles = await this.findRelatedTests(files);
-    const coverage = await this.getTestCoverage(files);
-    
-    return {
-      files: testFiles,
-      coverage: coverage || {}
+  private async buildTestContext(files: string[]): Promise<TestResult> {
+    const testFiles = files.filter(file => file.includes('.test.') || file.includes('.spec.'));
+    const testContext: TestResult = {
+      files: testFiles.map(file => ({
+        path: file,
+        content: '',
+        relevance: 1.0
+      })),
+      coverage: {}
     };
+    return testContext;
   }
 
   private async buildComponentHierarchy(files: string[]): Promise<Record<string, string[]>> {
@@ -1559,6 +1665,115 @@ class KnowledgeGraphService {
     } finally {
       await session.close();
     }
+  }
+
+  private buildDefaultContext(issue: ExtendedIssue): Array<{ path: string; content: string; relevance: number }> {
+    const defaultFiles = [];
+    
+    // Create issue context file
+    const issueContextFile = {
+      path: 'issue-context.txt',
+      content: `Issue Title: ${issue.title}\nRepository: ${issue.context?.repository || 'Unknown'}\nDescription: ${issue.description || 'No description provided'}`,
+      relevance: 1.0
+    };
+    
+    defaultFiles.push(issueContextFile);
+    console.log('Added issue context file:', issueContextFile.path);
+    
+    // Create repository info file if available
+    if (issue.context?.repository) {
+      const repoInfoFile = {
+        path: 'repository-info.txt',
+        content: `Repository: ${issue.context.repository}\nOwner: ${issue.context.githubMetadata?.owner || 'Unknown'}\nRepo: ${issue.context.githubMetadata?.repo || 'Unknown'}`,
+        relevance: 0.8
+      };
+      
+      defaultFiles.push(repoInfoFile);
+      console.log('Added repository info file:', repoInfoFile.path);
+    }
+    
+    // Add code snippets as separate files if available
+    if (issue.context?.codeSnippets && issue.context.codeSnippets.length > 0) {
+      issue.context.codeSnippets.forEach((snippet, index) => {
+        const snippetFile = {
+          path: `code-snippet-${index + 1}.txt`,
+          content: snippet,
+          relevance: 0.9
+        };
+        
+        defaultFiles.push(snippetFile);
+        console.log(`Added code snippet file: code-snippet-${index + 1}.txt`);
+      });
+    }
+    
+    console.log('Added default context files:', defaultFiles.map(file => file.path));
+    return defaultFiles;
+  }
+
+  private isFeatureRequest(issue: ExtendedIssue): boolean {
+    return issue.title.toLowerCase().includes('feature request');
+  }
+
+  private async handleFeatureRequest(issue: ExtendedIssue): Promise<BuildContextResult> {
+    console.log('Handling feature request:', issue.id);
+    
+    // Create feature request context
+    const featureContext = {
+      path: 'feature-request.txt',
+      content: `Feature Request: ${issue.title}\n\nDescription:\n${issue.description || 'No description provided'}\n\nRepository: ${issue.context?.repository || 'Unknown'}`,
+      relevance: 1.0
+    };
+    
+    // Create repository info file if available
+    const repoInfoFile = issue.context?.repository ? {
+      path: 'repository-info.txt',
+      content: `Repository: ${issue.context.repository}\nOwner: ${issue.context.githubMetadata?.owner || 'Unknown'}\nRepo: ${issue.context.githubMetadata?.repo || 'Unknown'}`,
+      relevance: 0.8
+    } : null;
+    
+    // Add code snippets as separate files if available
+    const snippetFiles = (issue.context?.codeSnippets || []).map((snippet, index) => ({
+      path: `code-snippet-${index + 1}.txt`,
+      content: snippet,
+      relevance: 0.9
+    }));
+    
+    // Build the files array with all available context
+    const files = [
+      featureContext,
+      ...(repoInfoFile ? [repoInfoFile] : []),
+      ...snippetFiles
+    ];
+    
+    console.log('Built feature request context with', files.length, 'files');
+    
+    return {
+      files,
+      relationships: [],
+      metadata: {
+        totalFiles: files.length,
+        stackTraceFiles: 0,
+        mentionedFiles: 0,
+        testFiles: 0,
+        timestamp: new Date().toISOString(),
+        description: issue.description || 'No description provided',
+        repository: issue.context?.repository || 'Unknown',
+        issueUrl: issue.context?.issueUrl || 'Unknown',
+        labels: issue.context?.labels || [],
+        githubMetadata: issue.context?.githubMetadata || null
+      },
+      projectStructure: {
+        hierarchy: {} as Record<string, string[]>,
+        dependencies: {} as Record<string, string[]>,
+        dependents: {} as Record<string, string[]>,
+        testCoverage: {} as Record<string, unknown>
+      },
+      dependencies: {
+        dependencies: {} as Record<string, string>,
+        devDependencies: {} as Record<string, string>,
+        peerDependencies: {} as Record<string, string>
+      }
+    };
   }
 }
 // Single export of the service instance

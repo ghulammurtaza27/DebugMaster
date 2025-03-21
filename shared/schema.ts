@@ -158,6 +158,24 @@ export interface Issue {
     issueUrl: string;
     labels: string[];
     codeSnippets: string[];
+    files?: Array<{
+      path: string;
+      content: string;
+      relevance?: number;
+    }>;
+    projectContext?: {
+      projectStructure: {
+        hierarchy: Record<string, string[]>;
+        dependencies: Record<string, string[]>;
+        dependents: Record<string, string[]>;
+        testCoverage: Record<string, any>;
+      };
+      dependencies: {
+        dependencies: Record<string, string>;
+        devDependencies: Record<string, string>;
+        peerDependencies: Record<string, string>;
+      };
+    };
     githubMetadata: {
       owner: string;
       repo: string;

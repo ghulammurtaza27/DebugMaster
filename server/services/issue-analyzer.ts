@@ -90,7 +90,6 @@ export class IssueAnalyzer {
       const stackTrace = issue.stacktrace || '';
 
       // Get related files and their content
-      // Handle case where graphContext.files might be empty or undefined
       const filesToAnalyze = graphContext.files || [];
       console.log('Files to analyze:', filesToAnalyze.map(file => typeof file === 'object' ? file.path : file));
       
@@ -136,15 +135,42 @@ export class IssueAnalyzer {
       if (suggestedFix && suggestedFix.files.length > 0) {
         for (const file of suggestedFix.files) {
           try {
-            const validation = await this.validateProposedChange({
-              file: file.path,
-              newCode: file.changes[0].newCode
-            });
+            // Get settings first to access owner and repo
+            const settings = await storage.getSettings();
+            if (!settings) {
+              throw new Error('GitHub settings not configured');
+            }
+
+            // Check if file exists first
+            let originalContent: string | null = null;
+            try {
+              const content = await githubService.getFileContents({
+                owner: settings.githubOwner,
+                repo: settings.githubRepo,
+                path: file.path
+              });
+              originalContent = typeof content === 'string' ? content : JSON.stringify(content);
+            } catch (error: any) {
+              if (error.status === 404) {
+                // File doesn't exist, treat as new file
+                console.log(`File ${file.path} doesn't exist, treating as new file`);
+                continue;
+              }
+              throw error;
+            }
             
-            if (!validation.isValid) {
-              console.warn(`Invalid fix for ${file.path}:`, validation.issues);
-              // Store validation issues for reference
-              await this.storeValidationIssues(issue.id, file.path, validation.issues);
+            // If file exists, validate the change using AI
+            if (originalContent) {
+              const validation = await this.ai.validateFix(
+                originalContent,
+                file.changes[0].newCode
+              );
+
+              if (!validation.isValid) {
+                console.warn(`Invalid fix for ${file.path}:`, validation.issues);
+                // Store validation issues for reference
+                await this.storeValidationIssues(issue.id, file.path, validation.issues);
+              }
             }
           } catch (error) {
             console.warn(`Validation failed for ${file.path}:`, error);
@@ -153,19 +179,7 @@ export class IssueAnalyzer {
         }
       }
 
-      // Create branch if needed and if we have fixes
-      if (!options.skipBranchCreation && suggestedFix && suggestedFix.files.length > 0) {
-        try {
-          const branchName = `fix/${issue.id}`;
-          await githubService.createBranch('main', branchName);
-        } catch (error) {
-          console.warn('Failed to create branch:', error);
-          // Continue even if branch creation fails
-        }
-      }
-
       // Map the relationships to match the expected type
-      // Handle case where graphContext.relationships might be empty or undefined
       const dependencies = (graphContext.relationships || []).map((rel: { source: string; relationship: string; target: string }) => ({
         source: rel.source,
         target: rel.target,
@@ -182,7 +196,7 @@ export class IssueAnalyzer {
           impactedComponents: analysis.impactedComponents,
           suggestedFix
         },
-        relatedFiles: filesToAnalyze.map(file => file.path),
+        relatedFiles: filesToAnalyze.map(file => typeof file === 'object' ? file.path : file),
         dependencies
       };
     } catch (error) {
@@ -253,24 +267,45 @@ export class IssueAnalyzer {
         throw new Error('GitHub settings not configured');
       }
 
-      const originalContent = await githubService.getFileContents({
-        owner: settings.githubOwner,
-        repo: settings.githubRepo,
-        path: change.file
-      });
+      // Check if file exists first
+      let originalContent: string | null = null;
+      try {
+        const content = await githubService.getFileContents({
+          owner: settings.githubOwner,
+          repo: settings.githubRepo,
+          path: change.file
+        });
+        originalContent = typeof content === 'string' ? content : JSON.stringify(content);
+      } catch (error: any) {
+        if (error.status === 404) {
+          // File doesn't exist, treat as new file
+          return {
+            isValid: true,
+            issues: []
+          };
+        }
+        throw error;
+      }
       
-      // Validate the change using AI
-      const validation = await this.ai.validateFix(
-        typeof originalContent === 'string' ? originalContent : JSON.stringify(originalContent),
-        change.newCode
-      );
+      // If file exists, validate the change using AI
+      if (originalContent) {
+        const validation = await this.ai.validateFix(
+          originalContent,
+          change.newCode
+        );
 
-      // Additional static analysis
-      const staticAnalysisIssues = await this.performStaticAnalysis(change.newCode);
-      
+        // Additional static analysis
+        const staticAnalysisIssues = await this.performStaticAnalysis(change.newCode);
+        
+        return {
+          isValid: validation.isValid && staticAnalysisIssues.length === 0,
+          issues: [...validation.issues, ...staticAnalysisIssues]
+        };
+      }
+
       return {
-        isValid: validation.isValid && staticAnalysisIssues.length === 0,
-        issues: [...validation.issues, ...staticAnalysisIssues]
+        isValid: true,
+        issues: []
       };
     } catch (error) {
       console.error('Validation failed:', error);

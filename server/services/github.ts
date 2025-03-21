@@ -24,6 +24,15 @@ interface PRStatus {
   }>;
 }
 
+interface CommitParams {
+  owner: string;
+  repo: string;
+  branch: string;
+  message: string;
+  content: string;
+  path: string;
+}
+
 export class GitHubService extends EventEmitter {
   private octokit: Octokit | null;
   private webhooks: Webhooks | null;
@@ -36,11 +45,20 @@ export class GitHubService extends EventEmitter {
   private rateLimitExceeded: boolean = false;
   private rateLimitReset: number = 0;
 
+  // Add public getters for owner and repo
+  getOwner(): string {
+    return this.owner;
+  }
+
+  getRepo(): string {
+    return this.repo;
+  }
+
   constructor(token?: string) {
     super();
-    this.token = token || process.env.GITHUB_TOKEN || "";
-    this.owner = process.env.GITHUB_OWNER || "";
-    this.repo = process.env.GITHUB_REPO || "";
+    this.token = token || "";
+    this.owner = "";
+    this.repo = "";
     this.octokit = null;
     this.webhooks = null;
     this.webhookSecret = process.env.GITHUB_WEBHOOK_SECRET || "";
@@ -52,7 +70,8 @@ export class GitHubService extends EventEmitter {
       tokenLength: this.token.length,
       owner: this.owner,
       repo: this.repo,
-      useMockData: this.useMockData
+      useMockData: this.useMockData,
+      hasWebhookSecret: !!this.webhookSecret
     });
   }
 
@@ -60,14 +79,26 @@ export class GitHubService extends EventEmitter {
     try {
       console.log('Initializing GitHub service...');
       
-      if (!this.token && !this.useMockData) {
-        console.error('GitHub token not configured');
-        throw new Error('GitHub token not configured. Please check your environment variables or settings.');
+      // Get settings from database
+      const settings = await storage.getSettings();
+      if (!settings) {
+        throw new Error('GitHub settings not configured');
       }
 
-      if (!this.owner || !this.repo) {
-        console.error('GitHub owner or repo not configured', { owner: this.owner, repo: this.repo });
-        throw new Error('GitHub owner and repo must be configured.');
+      // Update service properties with settings from database
+      this.token = this.token || settings.githubToken;
+      this.owner = settings.githubOwner;
+      this.repo = settings.githubRepo;
+      
+      // Check for required configuration
+      const missingConfig = [];
+      if (!this.token && !this.useMockData) missingConfig.push('GitHub Token');
+      if (!this.owner) missingConfig.push('GitHub Owner');
+      if (!this.repo) missingConfig.push('GitHub Repo');
+      
+      if (missingConfig.length > 0) {
+        console.error('Missing required GitHub configuration:', missingConfig);
+        throw new Error(`Missing required GitHub configuration: ${missingConfig.join(', ')}`);
       }
 
       // Skip actual GitHub API calls if using mock data
@@ -77,36 +108,94 @@ export class GitHubService extends EventEmitter {
         return;
       }
 
-      // Create Octokit instance
-      console.log('Creating Octokit instance with token...');
-      this.octokit = new Octokit({
-        auth: this.token
-      });
-      console.log('Octokit instance created successfully');
-
-      // Verify authentication
-      try {
-        console.log('Verifying GitHub authentication...');
-        const { data: user } = await this.octokit.users.getAuthenticated();
-        this.authenticatedUser = user.login;
-        console.log(`Successfully authenticated as ${this.authenticatedUser}`);
-      } catch (authError: any) {
-        console.error('GitHub authentication failed:', authError.message, {
-          status: authError.status,
-          headers: authError.response?.headers,
-          stack: authError.stack
-        });
-        if (authError.status === 401) {
-          throw new Error('Invalid GitHub token. Please check your token and try again.');
+      // Create Octokit instance with retry logic
+      let retryCount = 0;
+      const maxRetries = 5;
+      const maxTimeout = 10000; // 10 seconds
+      
+      while (retryCount < maxRetries) {
+        try {
+          console.log(`Attempt ${retryCount + 1}/${maxRetries} to create Octokit instance...`);
+          this.octokit = new Octokit({
+            auth: this.token,
+            request: {
+              retries: 3,
+              retryAfter: 5,
+              timeout: maxTimeout
+            },
+            timeZone: 'UTC'
+          });
+          console.log('Octokit instance created successfully');
+          break;
+        } catch (error: any) {
+          retryCount++;
+          console.warn(`Failed to create Octokit instance (attempt ${retryCount}/${maxRetries}):`, {
+            error: error.message,
+            cause: error.cause?.message,
+            code: error.cause?.code
+          });
+          
+          if (retryCount === maxRetries) throw error;
+          
+          // Exponential backoff with jitter
+          const delay = Math.min(1000 * Math.pow(2, retryCount) + Math.random() * 1000, maxTimeout);
+          console.log(`Retrying in ${Math.round(delay)}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
         }
-        throw authError;
+      }
+
+      // Verify authentication with better error handling and retry logic
+      retryCount = 0;
+      while (retryCount < maxRetries) {
+        try {
+          console.log(`Attempt ${retryCount + 1}/${maxRetries} to verify GitHub authentication...`);
+          const { data: user } = await this.octokit!.users.getAuthenticated();
+          this.authenticatedUser = user.login;
+          console.log(`Successfully authenticated as ${this.authenticatedUser}`);
+          break;
+        } catch (authError: any) {
+          retryCount++;
+          console.warn(`Authentication attempt ${retryCount}/${maxRetries} failed:`, {
+            status: authError.status,
+            message: authError.message,
+            cause: authError.cause?.message,
+            code: authError.cause?.code
+          });
+
+          // Handle specific error cases
+          if (authError.status === 401) {
+            throw new Error('Invalid GitHub token. Please check your token and try again.');
+          } else if (authError.status === 403) {
+            throw new Error('GitHub token lacks required permissions. Please check token scopes.');
+          } else if (authError.status === 429) {
+            throw new Error('GitHub API rate limit exceeded. Please try again later.');
+          }
+
+          // For network errors (ETIMEDOUT, ECONNREFUSED, etc.), retry with backoff
+          if (authError.cause?.code && ['ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND'].includes(authError.cause.code)) {
+            if (retryCount === maxRetries) {
+              throw new Error(`Network error connecting to GitHub API: ${authError.cause.code}. Please check your network connection.`);
+            }
+            const delay = Math.min(1000 * Math.pow(2, retryCount) + Math.random() * 1000, maxTimeout);
+            console.log(`Network error, retrying in ${Math.round(delay)}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+
+          throw authError;
+        }
       }
 
       // Initialize webhooks if secret is configured
       if (this.webhookSecret) {
+        console.log('Initializing GitHub webhooks...');
         this.webhooks = new Webhooks({
           secret: this.webhookSecret
         });
+        await this.setupWebhooks();
+        console.log('GitHub webhooks initialized successfully');
+      } else {
+        console.warn('GitHub webhook secret not configured, webhooks will be disabled');
       }
 
       console.log('GitHub service initialized successfully', {
@@ -387,28 +476,93 @@ export class GitHubService extends EventEmitter {
     }
   }
 
-  async createBranch(base: string, newBranch: string) {
+  async createBranch(base: string, newBranch: string, initialCommit?: { message: string; content: string; path: string }) {
     try {
-      await this.initialize();
+      // Initialize with retry logic
+      let retryCount = 0;
+      const maxRetries = 5;
+      const maxTimeout = 10000;
+
+      while (retryCount < maxRetries) {
+        try {
+          console.log(`Attempt ${retryCount + 1}/${maxRetries} to initialize GitHub service...`);
+          await this.initialize();
+          break;
+        } catch (error: any) {
+          retryCount++;
+          console.warn(`Failed to initialize GitHub service (attempt ${retryCount}/${maxRetries}):`, {
+            error: error.message,
+            cause: error.cause?.message,
+            code: error.cause?.code
+          });
+
+          if (retryCount === maxRetries) {
+            throw new Error(`Failed to initialize GitHub service after ${maxRetries} attempts: ${error.message}`);
+          }
+
+          // Exponential backoff with jitter for network errors
+          if (error.cause?.code && ['ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND'].includes(error.cause.code)) {
+            const delay = Math.min(1000 * Math.pow(2, retryCount) + Math.random() * 1000, maxTimeout);
+            console.log(`Network error, retrying in ${Math.round(delay)}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+
+          throw error;
+        }
+      }
+
       if (!this.octokit) throw new Error("GitHub client not initialized");
 
       // First ensure we have a fork
-      const fork = await this.ensureForked(this.owner, this.repo);
+      console.log('Ensuring fork exists...');
+      const fork = await this.retryOperation(
+        () => this.ensureForked(this.owner, this.repo),
+        'ensure fork exists',
+        maxRetries
+      );
       
       // Get the base branch reference from the original repo
-      const { data: ref } = await this.octokit.git.getRef({
-        owner: this.owner,
-        repo: this.repo,
-        ref: `heads/${base}`
-      });
+      console.log(`Getting base branch reference for ${base}...`);
+      const { data: ref } = await this.retryOperation(
+        () => this.octokit!.git.getRef({
+          owner: this.owner,
+          repo: this.repo,
+          ref: `heads/${base}`
+        }),
+        'get base branch reference',
+        maxRetries
+      );
 
       // Create branch in our fork
-      await this.octokit.git.createRef({
-        owner: this.authenticatedUser,
-        repo: this.repo,
-        ref: `refs/heads/${newBranch}`,
-        sha: ref.object.sha
-      });
+      console.log(`Creating branch ${newBranch} in fork...`);
+      await this.retryOperation(
+        () => this.octokit!.git.createRef({
+          owner: this.authenticatedUser,
+          repo: this.repo,
+          ref: `refs/heads/${newBranch}`,
+          sha: ref.object.sha
+        }),
+        'create branch',
+        maxRetries
+      );
+
+      // If initial commit is provided, create it
+      if (initialCommit) {
+        console.log('Creating initial commit...');
+        await this.retryOperation(
+          () => this.createCommit({
+            owner: this.authenticatedUser,
+            repo: this.repo,
+            branch: newBranch,
+            message: initialCommit.message,
+            content: initialCommit.content,
+            path: initialCommit.path
+          }),
+          'create initial commit',
+          maxRetries
+        );
+      }
 
       return {
         owner: this.authenticatedUser,
@@ -421,17 +575,130 @@ export class GitHubService extends EventEmitter {
     }
   }
 
+  // Helper method for retrying operations with exponential backoff
+  private async retryOperation<T>(
+    operation: () => Promise<T>,
+    operationName: string,
+    maxRetries: number = 5,
+    maxTimeout: number = 10000
+  ): Promise<T> {
+    let retryCount = 0;
+    
+    while (true) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        retryCount++;
+        console.warn(`Failed to ${operationName} (attempt ${retryCount}/${maxRetries}):`, {
+          error: error.message,
+          cause: error.cause?.message,
+          code: error.cause?.code
+        });
+
+        if (retryCount === maxRetries) {
+          throw new Error(`Failed to ${operationName} after ${maxRetries} attempts: ${error.message}`);
+        }
+
+        // Retry on network errors with exponential backoff and jitter
+        if (error.cause?.code && ['ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND'].includes(error.cause.code)) {
+          const delay = Math.min(1000 * Math.pow(2, retryCount) + Math.random() * 1000, maxTimeout);
+          console.log(`Network error, retrying in ${Math.round(delay)}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+
+        throw error;
+      }
+    }
+  }
+
+  async createCommit(params: CommitParams): Promise<void> {
+    if (!this.octokit) throw new Error("GitHub client not initialized");
+
+    try {
+      // Get the current commit SHA of the branch
+      const { data: ref } = await this.octokit.git.getRef({
+        owner: params.owner,
+        repo: params.repo,
+        ref: `heads/${params.branch}`
+      });
+
+      // Get the current tree
+      const { data: tree } = await this.octokit.git.getTree({
+        owner: params.owner,
+        repo: params.repo,
+        tree_sha: ref.object.sha,
+        recursive: '1'
+      });
+
+      // Create a blob with the new content
+      const { data: blob } = await this.octokit.git.createBlob({
+        owner: params.owner,
+        repo: params.repo,
+        content: params.content,
+        encoding: 'utf-8'
+      });
+
+      // Create a new tree with the updated file
+      const { data: newTree } = await this.octokit.git.createTree({
+        owner: params.owner,
+        repo: params.repo,
+        base_tree: tree.sha,
+        tree: [{
+          path: params.path,
+          mode: '100644',
+          type: 'blob',
+          sha: blob.sha
+        }]
+      });
+
+      // Create a new commit
+      const { data: commit } = await this.octokit.git.createCommit({
+        owner: params.owner,
+        repo: params.repo,
+        message: params.message,
+        tree: newTree.sha,
+        parents: [ref.object.sha]
+      });
+
+      // Update the branch reference
+      await this.octokit.git.updateRef({
+        owner: params.owner,
+        repo: params.repo,
+        ref: `heads/${params.branch}`,
+        sha: commit.sha
+      });
+
+      console.log(`Successfully created commit on branch ${params.branch}`);
+    } catch (error) {
+      console.error("Failed to create commit:", error);
+      throw error;
+    }
+  }
+
   async createPullRequest(title: string, body: string, head: string, base: string) {
     try {
       await this.initialize();
       if (!this.octokit) throw new Error("GitHub client not initialized");
+
+      // Verify that there are commits between the branches
+      const { data: comparison } = await this.octokit.repos.compareCommits({
+        owner: this.owner,
+        repo: this.repo,
+        base,
+        head: `${this.authenticatedUser}:${head}`
+      });
+
+      if (comparison.commits.length === 0) {
+        throw new Error("No commits found between branches. Please ensure changes are committed before creating a pull request.");
+      }
 
       const { data: pr } = await this.octokit.pulls.create({
         owner: this.owner,
         repo: this.repo,
         title,
         body,
-        head,
+        head: `${this.authenticatedUser}:${head}`,
         base
       });
       return pr;
@@ -497,23 +764,10 @@ export class GitHubService extends EventEmitter {
       (issue as any).description = description;
       console.log(`Created issue in our system with ID: ${issue.id}`);
 
-      // Skip branch creation during initial analysis
+      // Analyze the issue but don't create a PR
       console.log('Analyzing issue...');
       await issueAnalyzer.analyzeIssue(issue, { skipBranchCreation: true });
       console.log('Issue analysis complete');
-
-      // Create and initialize the integration manager
-      console.log('Creating and initializing IntegrationManager...');
-      const integrationManager = new IntegrationManager();
-      
-      // Pass the initialized GitHub client to the integration manager
-      console.log('Setting GitHub client on IntegrationManager...');
-      integrationManager.setGitHubClient(this);
-      
-      // Process the issue
-      console.log('Processing issue with IntegrationManager...');
-      await integrationManager.processIssue(issue);
-      console.log('Issue processing complete');
 
       return issue;
     } catch (error) {

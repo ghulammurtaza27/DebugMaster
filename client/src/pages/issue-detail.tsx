@@ -330,7 +330,11 @@ export default function IssueDetail() {
 
                 {/* Analysis Results */}
                 {!isLoadingAnalysis && analysis ? (
-                  <IssueAnalysis analysis={analysis} />
+                  <IssueAnalysis 
+                    analysis={analysis} 
+                    issueId={id}
+                    className="mt-4" 
+                  />
                 ) : isLoadingAnalysis ? (
                   <Card>
                     <CardHeader>

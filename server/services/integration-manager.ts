@@ -149,12 +149,6 @@ export class IntegrationManager {
                     })
                   );
 
-                  console.log('Repository content retrieved:', {
-                    isArray: Array.isArray(repoContent),
-                    contentLength: Array.isArray(repoContent) ? repoContent.length : 'N/A',
-                    type: typeof repoContent
-                  });
-
                   if (Array.isArray(repoContent)) {
                     const mainFiles = repoContent
                       .filter((f: { path: string; type: string }) => {
@@ -183,40 +177,25 @@ export class IntegrationManager {
                         if (typeof content === 'string') {
                           console.log(`Successfully retrieved content for ${file.path} (${content.length} chars)`);
                           codeSnippets.push(content);
-                        } else {
-                          console.warn(`Unexpected content type for ${file.path}:`, typeof content);
                         }
                       } catch (fileError) {
                         console.error(`Failed to fetch content for ${file.path}:`, fileError);
                       }
                     }
-                  } else {
-                    console.warn('Repository content is not an array:', typeof repoContent);
                   }
                 } catch (error) {
-                  console.error('Failed to fetch repository files:', {
-                    error: error instanceof Error ? error.message : 'Unknown error',
-                    owner,
-                    repo,
-                    stack: error instanceof Error ? error.stack : undefined
-                  });
+                  console.error('Failed to fetch repository files:', error);
                 }
               }
             }
           } catch (error) {
             console.error('Failed to fetch files from knowledge graph:', error);
           }
-        } else {
-          console.warn('Missing repository information:', {
-            contextRepository: issue.context?.repository,
-            githubMetadata: issue.context?.githubMetadata,
-            parsedInfo: { owner, repo }
-          });
         }
       }
 
       // Convert context to the format expected by AI service
-      const fileContext: FileContextItem[] = context.files.map((file: { path: string; content: string; relevance: number } | string) => ({
+      const fileContext = context.files.map((file: { path: string; content: string; relevance: number } | string) => ({
         path: typeof file === 'string' ? file.split('\n')[0].replace('File: ', '') : file.path,
         content: typeof file === 'string' ? file.split('\n').slice(1).join('\n') : file.content,
         relevance: typeof file === 'string' ? 0.5 : file.relevance
@@ -243,77 +222,80 @@ export class IntegrationManager {
         }
       });
 
-      if (!analysis.fix) {
-        console.warn('No fix proposed by AI analysis');
-        
-        // Log more detailed information about why no fix was proposed
-        if (analysis.diagnostics) {
-          console.log('AI analysis diagnostics:', {
-            message: analysis.diagnostics.message,
-            reasons: analysis.diagnostics.reasons,
-            suggestions: analysis.diagnostics.suggestions
-          });
-        }
-        
-        // Check if we have enough context to make a meaningful analysis
-        const contextQuality = this.assessContextQuality({
-          stacktrace: issue.stacktrace || '',
-          codeSnippets,
-          fileContext
-        });
-        
-        console.log('Context quality assessment:', contextQuality);
-        
-        // Store the analysis result even without a fix
-        try {
-          await knowledgeGraphService.storeAnalysisResult(issue, analysis);
-          console.log('Stored analysis result without fix');
-        } catch (storeError) {
-          console.error('Failed to store analysis result:', storeError);
-        }
-        
-        return {
-          ...analysis,
-          noFixReason: 'The AI was unable to generate a specific fix for this issue',
-          contextQuality
-        };
-      }
-
-      // Validate proposed fix
-      for (const change of analysis.fix.changes) {
-        const oldCode = change.changes[0]?.oldCode || '';
-        const newCode = change.changes[0]?.newCode || '';
-        
-        const validation = await this.ai.validateFix(
-          oldCode,
-          newCode
-        );
-
-        if (!validation.isValid) {
-          console.warn('Fix validation issues:', validation.issues);
-          // Handle invalid fix
-          continue;
-        }
-      }
-
-      // Create PR with fixes
-      const prDescription = this.generatePRDescription(analysis.fix);
-      const branchName = `fix/issue-${issue.id}`;
-      
-      await this.github.createBranch('main', branchName);
-      await this.github.createPullRequest(
-        `Fix: ${issue.title}`,
-        prDescription,
-        branchName,
-        'main'
-      );
-
-      // Store successful fix in knowledge graph
-      await knowledgeGraphService.storeFix(issue, analysis.fix);
+      // Store successful analysis in knowledge graph
+      await knowledgeGraphService.storeAnalysisResult(issue, analysis);
 
       return analysis;
     } catch (error) {
       console.error('Error processing issue:', error);
+      throw error;
+    }
+  }
+
+  async createPullRequest(issue: Issue, analysis: AIAnalysisResult) {
+    try {
+      if (!analysis.fix) {
+        throw new Error('No fix available to create pull request');
+      }
+
+      const branchName = `fix/issue-${issue.id}`;
+      
+      // Create branch with initial commit for the first file
+      const firstChange = analysis.fix.changes[0];
+      if (!firstChange) {
+        throw new Error('No changes to commit');
+      }
+
+      console.log('Creating branch with initial commit:', {
+        branch: branchName,
+        file: firstChange.file,
+        contentLength: firstChange.changes[0]?.newCode.length
+      });
+
+      // Create branch with initial commit
+      await this.github.createBranch('main', branchName, {
+        message: `fix: ${issue.title}`,
+        content: firstChange.changes[0]?.newCode || '',
+        path: firstChange.file
+      });
+
+      // Create additional commits for remaining files
+      for (let i = 1; i < analysis.fix.changes.length; i++) {
+        const change = analysis.fix.changes[i];
+        console.log('Creating additional commit:', {
+          branch: branchName,
+          file: change.file
+        });
+
+        await this.github.createCommit({
+          owner: this.github.getOwner(),
+          repo: this.github.getRepo(),
+          branch: branchName,
+          message: `fix: Update ${change.file}`,
+          content: change.changes[0]?.newCode || '',
+          path: change.file
+        });
+      }
+
+      // Wait a short moment to ensure GitHub has processed all commits
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Create the pull request
+      console.log('Creating pull request:', {
+        title: `Fix: ${issue.title}`,
+        branch: branchName
+      });
+
+      const pr = await this.github.createPullRequest(
+        `Fix: ${issue.title}`,
+        analysis.prDescription || this.generatePRDescription(analysis.fix),
+        branchName,
+        'main'
+      );
+
+      return { success: true, branchName, pr };
+    } catch (error) {
+      console.error('Error creating pull request:', error);
       throw error;
     }
   }

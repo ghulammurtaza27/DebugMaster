@@ -30,6 +30,8 @@ export interface AIAnalysisResult {
     hasRelevantFiles: boolean;
     suggestions: string[];
   };
+  metadata?: Record<string, string>;
+  prDescription?: string;
 }
 
 interface ProjectContext {
@@ -110,7 +112,54 @@ export class AIService {
         }
       };
       
-      const prompt = `As a senior developer, analyze this bug with the following context:
+      const prompt = `As a senior developer, analyze this bug and provide a response in the following EXACT format:
+
+ROOT CAUSE:
+[Clear explanation of the root cause]
+
+SEVERITY: [high|medium|low]
+
+IMPACTED COMPONENTS:
+- [component1]
+- [component2]
+
+${params.fileContext.length > 0 ? `CODE CHANGES:
+
+For each file that needs changes, use this format:
+\`\`\`
+File: [exact file path]
+[complete code with changes]
+\`\`\`
+
+Explanation: [why these changes fix the issue]
+` : ''}
+
+DIAGNOSTICS:
+Message: [diagnostic message]
+Reasons:
+- [reason1]
+- [reason2]
+Suggestions:
+- [suggestion1]
+- [suggestion2]
+
+${params.fileContext.length === 0 ? `NO_FIX_REASON: [Explain why no fix can be provided]
+
+ADDITIONAL_INFO_NEEDED:
+- [info1]
+- [info2]
+` : ''}
+
+CONTEXT QUALITY:
+Score: [0-100]
+Has Stacktrace: [true|false]
+Has Code Snippets: [true|false]
+Has Relevant Files: [true|false]
+Suggestions:
+- [suggestion1]
+- [suggestion2]
+
+Please analyze this bug with the following context:
 
 ISSUE DESCRIPTION:
 ${params.issueDescription}
@@ -131,25 +180,7 @@ TEST COVERAGE:
 ${JSON.stringify(projectContext.projectStructure.testCoverage, null, 2)}
 
 ADDITIONAL CONTEXT:
-${sortedFiles.slice(3).join('\n\n')}
-
-Please provide a detailed analysis including:
-1. Root cause analysis with specific line numbers and files
-2. Severity assessment (high/medium/low) with justification
-3. List of impacted components and their relationships
-4. Suggested fix with specific code changes in the following format:
-   \`\`\`
-   File: [exact file path]
-   [complete code snippet with your changes]
-   \`\`\`
-   For each file you modify, include:
-   - All necessary imports
-   - Complete function or class definitions
-   - Clear comments explaining your changes
-5. Potential side effects of the proposed fix
-6. Test cases to add or modify
-
-IMPORTANT: For your suggested fix, always include the complete file path and the full code snippet in a code block. If you don't have enough information to propose a specific fix, explain what additional information would be needed.`;
+${sortedFiles.slice(3).join('\n\n')}`;
 
       const result = await this.model.generateContent(prompt);
       const responseText = result.response.text();
@@ -322,33 +353,161 @@ Provide specific suggestions for:
 
   private parseAnalysisResponse(text: string): AIAnalysisResult {
     try {
-      // Basic parsing of AI response
       const lines = text.split('\n');
-      const rootCause = lines.find(l => l.includes('Root cause:'))?.split(':')[1]?.trim() || 'Unknown';
-      const severity = (lines.find(l => l.includes('Severity:'))?.split(':')[1]?.trim()?.toLowerCase() || 'medium') as 'high' | 'medium' | 'low';
-      const impactedComponents = lines
-        .find(l => l.includes('Impacted components:'))
-        ?.split(':')[1]
-        ?.split(',')
-        .map(s => s.trim())
-        || [];
-
-      // Parse code changes if present
-      const changes = this.parseCodeChanges(text);
-
-      return {
-        rootCause,
-        severity,
-        impactedComponents,
-        fix: changes ? { changes } : undefined
-      };
-    } catch (error) {
-      console.error('Failed to parse AI analysis response:', error);
-      return {
-        rootCause: 'Failed to parse AI response',
+      let currentSection = '';
+      let result: AIAnalysisResult = {
+        rootCause: '',
         severity: 'medium',
-        impactedComponents: []
+        impactedComponents: [],
+        fix: {
+          changes: []
+        }
       };
+
+      let currentFile = '';
+      let currentChanges: any[] = [];
+      let currentExplanation = '';
+      let inCodeBlock = false;
+      let codeBlockContent = '';
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+
+        // Skip empty lines
+        if (!line) continue;
+
+        // Handle section headers
+        if (line.toUpperCase().endsWith(':')) {
+          currentSection = line.slice(0, -1).toUpperCase();
+          continue;
+        }
+
+        // Process content based on current section
+        switch (currentSection) {
+          case 'ROOT CAUSE':
+            result.rootCause = line;
+            break;
+
+          case 'SEVERITY':
+            if (['high', 'medium', 'low'].includes(line.toLowerCase())) {
+              result.severity = line.toLowerCase() as 'high' | 'medium' | 'low';
+            }
+            break;
+
+          case 'IMPACTED COMPONENTS':
+            if (line.startsWith('-')) {
+              result.impactedComponents.push(line.slice(1).trim());
+            }
+            break;
+
+          case 'CODE CHANGES':
+            if (line.startsWith('```')) {
+              if (!inCodeBlock) {
+                // Start of code block
+                inCodeBlock = true;
+                codeBlockContent = '';
+                // Check next line for file path
+                const nextLine = lines[i + 1]?.trim();
+                if (nextLine?.startsWith('File:')) {
+                  currentFile = nextLine.replace('File:', '').trim();
+                  // Skip the file line
+                  i++;
+                }
+              } else {
+                // End of code block
+                inCodeBlock = false;
+                if (currentFile && codeBlockContent) {
+                  // Add the change
+                  currentChanges.push({
+                    lineStart: 1,
+                    lineEnd: codeBlockContent.split('\n').length,
+                    oldCode: '',
+                    newCode: codeBlockContent.trim(),
+                    explanation: currentExplanation
+                  });
+                  // Add to result
+                  if (!result.fix) {
+                    result.fix = { changes: [] };
+                  }
+                  result.fix.changes.push({
+                    file: currentFile,
+                    changes: [...currentChanges]
+                  });
+                  // Reset for next file
+                  currentChanges = [];
+                  currentFile = '';
+                  currentExplanation = '';
+                }
+              }
+            } else if (inCodeBlock) {
+              codeBlockContent += line + '\n';
+            } else if (line.startsWith('Explanation:')) {
+              currentExplanation = line.replace('Explanation:', '').trim();
+            }
+            break;
+
+          case 'DIAGNOSTICS':
+            if (!result.diagnostics) {
+              result.diagnostics = { message: '', reasons: [], suggestions: [] };
+            }
+            if (line.startsWith('Message:')) {
+              result.diagnostics.message = line.replace('Message:', '').trim();
+            } else if (line.startsWith('-')) {
+              if (!result.diagnostics.reasons) {
+                result.diagnostics.reasons = [];
+              }
+              result.diagnostics.reasons.push(line.slice(1).trim());
+            }
+            break;
+
+          case 'NO_FIX_REASON':
+            result.noFixReason = line;
+            break;
+
+          case 'CONTEXT QUALITY':
+            if (!result.contextQuality) {
+              result.contextQuality = {
+                score: 0,
+                hasStacktrace: false,
+                hasCodeSnippets: false,
+                hasRelevantFiles: false,
+                suggestions: []
+              };
+            }
+            if (line.startsWith('Score:')) {
+              result.contextQuality.score = parseInt(line.replace('Score:', '').trim()) / 100;
+            } else if (line.startsWith('Has Stacktrace:')) {
+              result.contextQuality.hasStacktrace = line.toLowerCase().includes('true');
+            } else if (line.startsWith('Has Code Snippets:')) {
+              result.contextQuality.hasCodeSnippets = line.toLowerCase().includes('true');
+            } else if (line.startsWith('Has Relevant Files:')) {
+              result.contextQuality.hasRelevantFiles = line.toLowerCase().includes('true');
+            } else if (line.startsWith('-')) {
+              result.contextQuality.suggestions.push(line.slice(1).trim());
+            }
+            break;
+        }
+      }
+
+      // Clean up empty or invalid changes
+      if (result.fix?.changes) {
+        result.fix.changes = result.fix.changes.filter(change => 
+          change.file && 
+          change.file !== 'unknown.js' && 
+          change.changes.length > 0 &&
+          change.changes.some(c => c.newCode.trim())
+        );
+        
+        // If no valid changes, remove the fix object
+        if (result.fix.changes.length === 0) {
+          delete result.fix;
+        }
+      }
+
+      return result;
+    } catch (error) {
+      console.error('Failed to parse AI response:', error);
+      throw error;
     }
   }
 
@@ -403,14 +562,6 @@ Provide specific suggestions for:
     }>;
   }> | null {
     try {
-      // Look for code blocks with triple backticks
-      const codeBlockRegex = /```[\s\S]*?```/g;
-      const codeBlocks = text.match(codeBlockRegex);
-      
-      // Also look for sections that might contain code changes
-      const fixSectionRegex = /(?:Fix|Solution|Code changes|Suggested fix):([\s\S]*?)(?:\n\n|\n##|$)/i;
-      const fixSection = text.match(fixSectionRegex);
-      
       const changes: Array<{
         file: string;
         changes: Array<{
@@ -422,112 +573,53 @@ Provide specific suggestions for:
         }>;
       }> = [];
 
-      // Process code blocks
-      if (codeBlocks) {
-        for (const block of codeBlocks) {
-          const lines = block.replace(/```/g, '').trim().split('\n');
-          
-          // Try to find file name in first line or nearby text
-          const fileMatch = lines[0].match(/File: (.*)/i) || lines[0].match(/^([^:\n]+\.[a-z]+)$/i);
-          let file = '';
-          let codeLines = lines;
-          
-          if (fileMatch) {
-            file = fileMatch[1].trim();
-            codeLines = lines.slice(1); // Remove the file line
-          } else {
-            // Try to infer file from context around the code block
-            const beforeBlock = text.substring(0, text.indexOf(block));
-            const fileInferRegex = /(?:in|file|path|modify):\s*([^\s,\n]+\.[a-z]+)/i;
-            const inferMatch = beforeBlock.match(fileInferRegex);
-            file = inferMatch ? inferMatch[1].trim() : 'unknown.js';
-          }
+      // Split into sections by code blocks
+      const sections = text.split('```');
+      let currentExplanation = '';
 
-          // Skip empty code blocks or those that appear to be examples rather than fixes
-          if (codeLines.length === 0 || block.includes('example') || block.includes('Example')) {
-            continue;
-          }
-
-          // Extract explanation from surrounding text
-          let explanation = 'AI-generated fix';
-          const blockIndex = text.indexOf(block);
-          if (blockIndex > 0) {
-            const beforeBlock = text.substring(0, blockIndex).trim();
-            const lastParagraph = beforeBlock.split('\n\n').pop() || '';
-            if (lastParagraph.length > 0 && lastParagraph.length < 500) {
-              explanation = lastParagraph;
-            }
-          }
-
-          const changeBlock = {
-            file,
-            changes: [{
-              lineStart: 1,
-              lineEnd: codeLines.length,
-              oldCode: '',
-              newCode: codeLines.join('\n'),
-              explanation
-            }]
-          };
-
-          changes.push(changeBlock);
-        }
-      }
-
-      // If no changes found but there's a fix section, try to extract from there
-      if (changes.length === 0 && fixSection && fixSection[1]) {
-        const fixText = fixSection[1].trim();
+      for (let i = 0; i < sections.length; i++) {
+        const section = sections[i].trim();
         
-        // Simple heuristic: if the fix section contains code-like content
-        if (fixText.includes('{') || fixText.includes('function') || fixText.includes('const') || 
-            fixText.includes('import') || fixText.includes('export')) {
+        // Skip empty sections
+        if (!section) continue;
+
+        // If this is a non-code section, store it as the explanation for the next code block
+        if (i % 2 === 0) {
+          if (section.toLowerCase().includes('explanation:')) {
+            currentExplanation = section
+              .split('Explanation:')[1]
+              .trim();
+          }
+          continue;
+        }
+
+        // This is a code section
+        const lines = section.split('\n');
+        const fileMatch = lines[0].match(/^File:\s*(.+)$/i);
+        
+        if (fileMatch) {
+          const file = fileMatch[1].trim();
+          const code = lines.slice(1).join('\n').trim();
           
-          // Try to find a file reference in the fix section
-          const fileInferRegex = /(?:in|file|path|modify):\s*([^\s,\n]+\.[a-z]+)/i;
-          const inferMatch = fixText.match(fileInferRegex);
-          const file = inferMatch ? inferMatch[1].trim() : 'inferred-file.js';
-          
+          // Skip empty code blocks
+          if (!code) continue;
+
           changes.push({
             file,
             changes: [{
               lineStart: 1,
-              lineEnd: 1,
+              lineEnd: code.split('\n').length,
               oldCode: '',
-              newCode: fixText,
-              explanation: 'Inferred from AI analysis'
+              newCode: code,
+              explanation: currentExplanation || 'AI-suggested fix'
             }]
           });
+
+          // Reset explanation for next block
+          currentExplanation = '';
         }
       }
 
-      // Look for diff blocks which might contain old and new code
-      if (changes.length === 0) {
-        const diffRegex = /```diff\n([\s\S]*?)```/g;
-        let diffMatch;
-        
-        while ((diffMatch = diffRegex.exec(text)) !== null) {
-          const diffContent = diffMatch[1];
-          const fileMatch = diffContent.match(/^(?:---|\+\+\+)\s+([^\s\n]+)/m);
-          const file = fileMatch ? fileMatch[1].replace(/^[ab]\//, '') : 'diff-file.js';
-          
-          // Split into old and new code sections
-          const oldLines = diffContent.match(/^-[^\n]+/gm)?.map(line => line.substring(1)) || [];
-          const newLines = diffContent.match(/^\+[^\n]+/gm)?.map(line => line.substring(1)) || [];
-          
-          changes.push({
-            file,
-            changes: [{
-              lineStart: 1,
-              lineEnd: newLines.length,
-              oldCode: oldLines.join('\n'),
-              newCode: newLines.join('\n'),
-              explanation: 'Extracted from diff'
-            }]
-          });
-        }
-      }
-
-      console.log(`Parsed ${changes.length} code changes from AI response`);
       return changes.length > 0 ? changes : null;
     } catch (error) {
       console.error('Failed to parse code changes:', error);

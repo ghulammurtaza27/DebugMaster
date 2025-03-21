@@ -1,16 +1,37 @@
-import { AlertTriangle, CheckCircle2, HelpCircle, Lightbulb, XCircle } from 'lucide-react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { AlertTriangle, CheckCircle2, HelpCircle, Lightbulb, XCircle, GitPullRequest } from 'lucide-react';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
+import { Button } from '@/components/ui/button';
+import { FileChanges } from '@/components/file-changes';
+import { useToast } from '@/hooks/use-toast';
+import { useMutation } from '@tanstack/react-query';
+import { apiRequest } from '@/lib/queryClient';
+
+interface CodeChange {
+  lineStart: number;
+  lineEnd: number;
+  oldCode: string;
+  newCode: string;
+  explanation: string;
+}
+
+interface FileChange {
+  file: string;
+  changes: CodeChange[];
+}
 
 interface AnalysisResult {
-  rootCause?: string;
-  severity?: 'high' | 'medium' | 'low';
-  impactedComponents?: string[];
+  rootCause: string;
+  severity: 'high' | 'medium' | 'low';
+  impactedComponents: string[];
+  fix?: {
+    changes: FileChange[];
+  };
   diagnostics?: {
-    message?: string;
-    reasons?: string[];
-    suggestions?: string[];
+    message: string;
+    reasons: string[];
+    suggestions: string[];
   };
   noFixReason?: string;
   contextQuality?: {
@@ -24,179 +45,154 @@ interface AnalysisResult {
 
 interface IssueAnalysisProps {
   analysis: AnalysisResult;
+  issueId: number;
   className?: string;
 }
 
-export const IssueAnalysis = ({ analysis, className }: IssueAnalysisProps) => {
-  if (!analysis) {
-    return (
-      <Card className={className}>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <HelpCircle className="h-5 w-5 text-muted-foreground" />
-            Analysis
-          </CardTitle>
-          <CardDescription>No analysis available yet</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="text-center py-6 text-muted-foreground">
-            <p>Run analysis to get insights about this issue</p>
-          </div>
-        </CardContent>
-      </Card>
-    );
-  }
+export const IssueAnalysis = ({ analysis, issueId, className }: IssueAnalysisProps) => {
+  const { toast } = useToast();
 
-  const getSeverityBadge = (severity?: 'high' | 'medium' | 'low') => {
-    switch (severity) {
+  const createPRMutation = useMutation({
+    mutationFn: async () => {
+      const response = await fetch(`/api/issues/${issueId}/create-pr`, {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        throw new Error('Failed to create pull request');
+      }
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: "Pull Request Created",
+        description: "The pull request has been created successfully.",
+      });
+    },
+    onError: (error) => {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const handleCreatePR = () => {
+    createPRMutation.mutate();
+  };
+
+  const getSeverityColor = (severity: string) => {
+    switch (severity.toLowerCase()) {
       case 'high':
-        return <Badge variant="destructive" className="flex items-center gap-1"><AlertTriangle className="h-3 w-3" /> High</Badge>;
+        return 'bg-red-500';
       case 'medium':
-        return <Badge variant="secondary" className="flex items-center gap-1"><AlertTriangle className="h-3 w-3" /> Medium</Badge>;
+        return 'bg-yellow-500';
       case 'low':
-        return <Badge variant="outline" className="flex items-center gap-1"><AlertTriangle className="h-3 w-3" /> Low</Badge>;
+        return 'bg-green-500';
       default:
-        return <Badge variant="outline">Unknown</Badge>;
+        return 'bg-gray-500';
     }
   };
 
-  const getQualityIndicator = (score?: number) => {
-    if (score === undefined) return null;
-    
-    if (score >= 0.7) {
-      return <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-100 flex items-center gap-1"><CheckCircle2 className="h-3 w-3" /> Good</Badge>;
-    } else if (score >= 0.4) {
-      return <Badge variant="secondary" className="flex items-center gap-1"><AlertTriangle className="h-3 w-3" /> Moderate</Badge>;
-    } else {
-      return <Badge variant="destructive" className="flex items-center gap-1"><XCircle className="h-3 w-3" /> Poor</Badge>;
-    }
-  };
+  if (!analysis) {
+    return null;
+  }
 
   return (
     <Card className={className}>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Lightbulb className="h-5 w-5 text-amber-500" />
+        <CardTitle className="flex items-center justify-between">
           Analysis Results
+          <Badge className={getSeverityColor(analysis.severity)}>
+            {analysis.severity.toUpperCase()}
+          </Badge>
         </CardTitle>
-        <CardDescription>AI-powered issue analysis</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-6">
-        {analysis.rootCause && (
+      <CardContent className="space-y-4">
+        <div>
+          <h3 className="font-semibold mb-2">Root Cause</h3>
+          <p>{analysis.rootCause}</p>
+        </div>
+
+        {analysis.impactedComponents.length > 0 && (
           <div>
-            <h3 className="text-sm font-medium mb-2 flex items-center gap-2">
-              Root Cause
-              {analysis.severity && (
-                <span className="ml-auto">{getSeverityBadge(analysis.severity)}</span>
-              )}
-            </h3>
-            <p className="text-sm text-muted-foreground">{analysis.rootCause}</p>
+            <h3 className="font-semibold mb-2">Impacted Components</h3>
+            <div className="flex flex-wrap gap-2">
+              {analysis.impactedComponents.map((component, index) => (
+                <Badge key={index} variant="outline">
+                  {component}
+                </Badge>
+              ))}
+            </div>
           </div>
         )}
 
-        {analysis.impactedComponents && analysis.impactedComponents.length > 0 && (
+        {analysis.fix?.changes && (
           <div>
-            <h3 className="text-sm font-medium mb-2">Impacted Components</h3>
-            <div className="flex flex-wrap gap-2">
-              {analysis.impactedComponents.map((component, index) => (
-                <Badge key={index} variant="outline">{component}</Badge>
+            <h3 className="font-semibold mb-2">Suggested Changes</h3>
+            <div className="space-y-4">
+              {analysis.fix.changes.map((fileChange, fileIndex) => (
+                <div key={fileIndex} className="border rounded-lg p-4">
+                  <h4 className="font-medium mb-2">{fileChange.file}</h4>
+                  {fileChange.changes.map((change, changeIndex) => (
+                    <div key={changeIndex} className="space-y-2">
+                      <p className="text-sm text-muted-foreground">{change.explanation}</p>
+                      <div className="bg-muted p-4 rounded-md">
+                        <div className="mb-2">
+                          <div className="text-sm font-mono bg-red-100 dark:bg-red-900/30 p-2 rounded">
+                            <pre className="whitespace-pre-wrap">{change.oldCode || '(No previous code)'}</pre>
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-sm font-mono bg-green-100 dark:bg-green-900/30 p-2 rounded">
+                            <pre className="whitespace-pre-wrap">{change.newCode}</pre>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               ))}
             </div>
           </div>
         )}
 
         {analysis.noFixReason && (
-          <div>
-            <h3 className="text-sm font-medium mb-2 flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 text-amber-500" />
-              No Fix Available
-            </h3>
-            <p className="text-sm text-muted-foreground">{analysis.noFixReason}</p>
+          <div className="text-yellow-600 dark:text-yellow-400">
+            <p>{analysis.noFixReason}</p>
           </div>
         )}
 
-        {analysis.contextQuality && (
-          <>
-            <Separator />
-            <div>
-              <h3 className="text-sm font-medium mb-2 flex items-center gap-2">
-                Context Quality
-                <span className="ml-auto">{getQualityIndicator(analysis.contextQuality.score)}</span>
-              </h3>
-              <div className="grid grid-cols-3 gap-2 mb-4">
-                <div className="text-center p-2 border rounded-md">
-                  <p className="text-xs text-muted-foreground">Stack Trace</p>
-                  {analysis.contextQuality.hasStacktrace ? (
-                    <CheckCircle2 className="h-4 w-4 text-green-500 mx-auto mt-1" />
-                  ) : (
-                    <XCircle className="h-4 w-4 text-red-500 mx-auto mt-1" />
-                  )}
-                </div>
-                <div className="text-center p-2 border rounded-md">
-                  <p className="text-xs text-muted-foreground">Code Snippets</p>
-                  {analysis.contextQuality.hasCodeSnippets ? (
-                    <CheckCircle2 className="h-4 w-4 text-green-500 mx-auto mt-1" />
-                  ) : (
-                    <XCircle className="h-4 w-4 text-red-500 mx-auto mt-1" />
-                  )}
-                </div>
-                <div className="text-center p-2 border rounded-md">
-                  <p className="text-xs text-muted-foreground">Relevant Files</p>
-                  {analysis.contextQuality.hasRelevantFiles ? (
-                    <CheckCircle2 className="h-4 w-4 text-green-500 mx-auto mt-1" />
-                  ) : (
-                    <XCircle className="h-4 w-4 text-red-500 mx-auto mt-1" />
-                  )}
-                </div>
-              </div>
-              {analysis.contextQuality.suggestions && analysis.contextQuality.suggestions.length > 0 && (
-                <div>
-                  <p className="text-xs font-medium mb-1">Suggestions to improve analysis:</p>
-                  <ul className="text-xs text-muted-foreground space-y-1 list-disc pl-4">
-                    {analysis.contextQuality.suggestions.map((suggestion, index) => (
-                      <li key={index}>{suggestion}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          </>
-        )}
-
         {analysis.diagnostics && (
-          <>
-            <Separator />
-            <div>
-              <h3 className="text-sm font-medium mb-2">Diagnostics</h3>
-              {analysis.diagnostics.message && (
-                <p className="text-sm text-muted-foreground mb-2">{analysis.diagnostics.message}</p>
-              )}
-              
-              {analysis.diagnostics.reasons && analysis.diagnostics.reasons.length > 0 && (
-                <div className="mb-3">
-                  <p className="text-xs font-medium mb-1">Reasons:</p>
-                  <ul className="text-xs text-muted-foreground space-y-1 list-disc pl-4">
-                    {analysis.diagnostics.reasons.map((reason, index) => (
-                      <li key={index}>{reason}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              
-              {analysis.diagnostics.suggestions && analysis.diagnostics.suggestions.length > 0 && (
-                <div>
-                  <p className="text-xs font-medium mb-1">Suggestions:</p>
-                  <ul className="text-xs text-muted-foreground space-y-1 list-disc pl-4">
-                    {analysis.diagnostics.suggestions.map((suggestion, index) => (
-                      <li key={index}>{suggestion}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          </>
+          <div>
+            <h3 className="font-semibold mb-2">Diagnostics</h3>
+            <p>{analysis.diagnostics.message}</p>
+            {analysis.diagnostics.reasons.length > 0 && (
+              <div className="mt-2">
+                <h4 className="font-medium">Reasons:</h4>
+                <ul className="list-disc list-inside">
+                  {analysis.diagnostics.reasons.map((reason, index) => (
+                    <li key={index}>{reason}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
         )}
       </CardContent>
+      
+      {analysis.fix?.changes && (
+        <CardFooter>
+          <Button
+            onClick={handleCreatePR}
+            disabled={createPRMutation.isPending}
+            className="w-full"
+          >
+            <GitPullRequest className="w-4 h-4 mr-2" />
+            {createPRMutation.isPending ? "Creating Pull Request..." : "Create Pull Request"}
+          </Button>
+        </CardFooter>
+      )}
     </Card>
   );
 }; 

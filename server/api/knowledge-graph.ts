@@ -69,43 +69,44 @@ router.get('/edges', async (req, res) => {
 // Analyze repository
 router.post('/analyze', async (req, res) => {
   try {
-    const owner = process.env.GITHUB_OWNER;
-    const repo = process.env.GITHUB_REPO;
-    const token = process.env.GITHUB_TOKEN;
-    
+    // Get settings from database
+    const settings = await storage.getSettings();
+    if (!settings) {
+      throw new Error('GitHub settings not configured in database');
+    }
+
     console.log('GitHub Configuration:', {
-      hasToken: !!token,
-      tokenLength: token?.length || 0,
-      owner,
-      repo,
-      envKeys: Object.keys(process.env).filter(key => key.startsWith('GITHUB_'))
+      hasToken: !!settings.githubToken,
+      tokenLength: settings.githubToken?.length || 0,
+      owner: settings.githubOwner,
+      repo: settings.githubRepo
     });
     
-    if (!owner || !repo) {
-      throw new Error('GitHub owner and repo must be configured');
+    if (!settings.githubOwner || !settings.githubRepo) {
+      throw new Error('GitHub owner and repo must be configured in database');
     }
 
-    if (!token) {
-      throw new Error('GitHub token not found in environment variables. Please check your .env file and server configuration.');
+    if (!settings.githubToken) {
+      throw new Error('GitHub token not found in database settings');
     }
 
-    // Initialize GitHub service with token from environment
+    // Initialize GitHub service (it will get settings from database)
     console.log('Initializing GitHub service...');
     await githubService.initialize();
     
-    // Test GitHub connection (no parameters needed as they're set in the service)
+    // Test GitHub connection
     console.log('Testing GitHub connection...');
     await githubService.testConnection();
     
-    console.log(`Starting analysis of ${owner}/${repo}`);
-    await knowledgeGraphService.analyzeRepository(owner, repo);
+    console.log(`Starting analysis of ${settings.githubOwner}/${settings.githubRepo}`);
+    await knowledgeGraphService.analyzeRepository(settings.githubOwner, settings.githubRepo);
     res.json({ message: 'Analysis complete' });
   } catch (error) {
     console.error('Error analyzing repository:', error);
     if (error instanceof Error) {
       res.status(500).json({ 
         error: error.message,
-        details: 'Failed to analyze repository. Please check GitHub token permissions and repository access.'
+        details: 'Failed to analyze repository. Please check GitHub settings in database.'
       });
     } else {
       res.status(500).json({ 

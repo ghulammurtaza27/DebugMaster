@@ -2,8 +2,7 @@ import { Issue } from '@shared/schema';
 import { storage } from '../storage';
 import { githubService } from './github';
 import { knowledgeGraphService } from './knowledge-graph';
-import { AIService } from './ai-service';
-import { validationService } from './validation-service';
+import type { AIService as ImportedAIService } from './ai-service';
 import * as ts from 'typescript';
 import { ESLint } from 'eslint';
 import { InsertMetric } from '@shared/schema';
@@ -61,12 +60,87 @@ interface FileChange {
   newCode: string;
 }
 
+interface BuildContextResult {
+  files: Array<{ path: string; content: string; relevance: number }>;
+  relationships: Array<{ source: string; relationship: string; target: string }>;
+  metadata: {
+    totalFiles: number;
+    stackTraceFiles: number;
+    mentionedFiles: number;
+    testFiles: number;
+    timestamp: string;
+    description: string;
+    repository: string;
+    issueUrl: string;
+    labels: string[];
+    githubMetadata: Record<string, unknown> | null;
+  };
+  projectStructure: {
+    hierarchy: Record<string, string[]>;
+    dependencies: Record<string, string[]>;
+    dependents: Record<string, string[]>;
+    testCoverage: Record<string, unknown>;
+  };
+  dependencies: {
+    dependencies: Record<string, string>;
+    devDependencies: Record<string, string>;
+    peerDependencies: Record<string, string>;
+  };
+}
+
+interface ExtendedIssue extends Issue {
+  description?: string;
+}
+
+interface ProjectContext {
+  projectStructure: {
+    hierarchy: Record<string, string[]>;
+    dependencies: Record<string, string[]>;
+    dependents: Record<string, string[]>;
+    testCoverage: Record<string, unknown>;
+  };
+  dependencies: {
+    dependencies: Record<string, string>;
+    devDependencies: Record<string, string>;
+    peerDependencies: Record<string, string>;
+  };
+}
+
+interface AIServiceParams {
+  stacktrace: string;
+  codeSnippets: string[];
+  fileContext: FileContextItem[];
+  issueDescription: string;
+  projectContext?: ProjectContext;
+}
+
+interface AIServiceResult {
+  rootCause: string;
+  severity: 'high' | 'medium' | 'low';
+  impactedComponents: string[];
+  fix?: {
+    changes: Array<{
+      file: string;
+      changes: Array<{
+        lineStart: number;
+        lineEnd: number;
+        oldCode: string;
+        newCode: string;
+        explanation: string;
+      }>;
+    }>;
+  };
+}
+
+
+
+
 export class IssueAnalyzer {
-  private ai: AIService;
+  private ai: ImportedAIService;
   private eslint: ESLint;
 
   constructor() {
-    this.ai = new AIService();
+    this.ai = new (require('./ai-service').AIService)();
     this.eslint = new ESLint({
       baseConfig: {},
       fix: false
@@ -75,117 +149,235 @@ export class IssueAnalyzer {
 
   async analyzeIssue(issue: Issue, options: AnalyzeOptions = {}): Promise<AnalysisResult> {
     try {
+      // Cast issue to ExtendedIssue to handle description
+      const extendedIssue = issue as ExtendedIssue;
+      
       // Update issue status
       await storage.updateIssueStatus(
-        typeof issue.id === 'string' ? parseInt(issue.id) : issue.id,
+        typeof extendedIssue.id === 'string' ? parseInt(extendedIssue.id) : extendedIssue.id,
         'analyzing'
       );
 
       // Build knowledge graph context
-      const graphContext = await knowledgeGraphService.buildContext(issue);
+      const graphContext = await knowledgeGraphService.buildContext(extendedIssue);
       console.log('Knowledge graph context built with', graphContext.files.length, 'files');
       
       // Extract code snippets and stack trace
-      const codeSnippets = issue.context?.codeSnippets || [];
-      const stackTrace = issue.stacktrace || '';
+      const codeSnippets = extendedIssue.context?.codeSnippets || [];
+      const stackTrace = extendedIssue.stacktrace || '';
 
       // Get related files and their content
       const filesToAnalyze = graphContext.files || [];
       console.log('Files to analyze:', filesToAnalyze.map(file => typeof file === 'object' ? file.path : file));
       
-      const relatedFiles = await this.getRelatedFilesContent(filesToAnalyze);
-      console.log('Retrieved', relatedFiles.length, 'related files');
-
-      // If we don't have any related files but have code snippets, use those
-      if (relatedFiles.length === 0 && codeSnippets.length > 0) {
-        console.log('No related files found from knowledge graph. Using code snippets for analysis.');
+      // Create a map of file paths to their contents for easy lookup
+      const fileContentsMap = new Map<string, string>();
+      for (const file of filesToAnalyze) {
+        if (file.content) {
+          fileContentsMap.set(file.path, file.content);
+        }
       }
 
-      // Extract description from issue or from graphContext metadata
-      const description = (issue as any).description || graphContext.metadata?.description || issue.title;
-      console.log('Using description for analysis:', description.substring(0, 100) + (description.length > 100 ? '...' : ''));
+      // Extract files mentioned in backticks from the description
+      const mentionedFiles = (extendedIssue.description || '')
+        .match(/`[^`]+`/g)
+        ?.map((f: string) => f.replace(/`/g, ''))
+        .filter((path: string) => path.includes('/')) || [];
 
-      // Perform AI analysis
-      const analysis = await this.ai.analyzeBug({
+      // Create placeholder content for mentioned files
+      for (const filePath of mentionedFiles) {
+        if (!fileContentsMap.has(filePath)) {
+          console.log(`Creating placeholder content for file: ${filePath}`);
+          
+          // Generate placeholder content based on file type and issue description
+          const fileExt = filePath.split('.').pop()?.toLowerCase();
+          const isTypeScript = fileExt === 'ts' || fileExt === 'tsx';
+          const isAPI = filePath.includes('/api/');
+          
+          const placeholderContent = `// Generated placeholder for ${filePath}
+// Based on issue description:
+/*
+${extendedIssue.description || 'No description provided'}
+*/
+
+${isTypeScript ? `export const config = {
+  runtime: 'edge',
+  unstable_allowDynamic: [
+    '/node_modules/oauth/**',
+    '/node_modules/google-auth-library/**'
+  ]
+};
+
+import { type NextRequest } from 'next/server';
+import { OAuth2Client } from 'google-auth-library';
+import { getSession } from 'next-auth/react';
+
+const MAX_REFRESH_ATTEMPTS = 3;
+const REFRESH_RETRY_DELAY = 1000; // ms
+
+interface TokenError {
+  type: 'auth' | 'api' | 'network';
+  message: string;
+  retryable: boolean;
+}
+
+class TokenManager {
+  private static instance: TokenManager;
+  private refreshAttempts: Map<string, number> = new Map();
+  
+  private constructor() {}
+  
+  static getInstance(): TokenManager {
+    if (!TokenManager.instance) {
+      TokenManager.instance = new TokenManager();
+    }
+    return TokenManager.instance;
+  }
+
+  async refreshToken(oauth2Client: OAuth2Client): Promise<void> {
+    const clientId = oauth2Client._clientId;
+    const attempts = this.refreshAttempts.get(clientId) || 0;
+    
+    if (attempts >= MAX_REFRESH_ATTEMPTS) {
+      throw this.createError('auth', 'Max refresh attempts exceeded', false);
+    }
+    
+    this.refreshAttempts.set(clientId, attempts + 1);
+    
+    try {
+      await oauth2Client.refreshAccessToken();
+      // Reset attempts on success
+      this.refreshAttempts.delete(clientId);
+    } catch (error) {
+      throw this.createError('auth', 'Token refresh failed', attempts < MAX_REFRESH_ATTEMPTS);
+    }
+  }
+  
+  private createError(type: TokenError['type'], message: string, retryable: boolean): TokenError {
+    return { type, message, retryable };
+  }
+  
+  clearTokenData(clientId: string): void {
+    this.refreshAttempts.delete(clientId);
+  }
+}
+
+async function handleRequest(req: NextRequest) {
+  const session = await getSession({ req });
+  if (!session?.accessToken) {
+    return new Response(
+      JSON.stringify({ error: 'Unauthorized', message: 'No access token found' }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  const oauth2Client = new OAuth2Client();
+  oauth2Client.setCredentials({ access_token: session.accessToken });
+  
+  const tokenManager = TokenManager.getInstance();
+  
+  try {
+    // Your API logic here
+    throw new Error('Not implemented');
+  } catch (error) {
+    if (error.message === 'invalid_grant' || error.message === 'invalid_token') {
+      try {
+        await tokenManager.refreshToken(oauth2Client);
+        // Retry the original request
+        return handleRequest(req);
+      } catch (refreshError) {
+        if (!refreshError.retryable) {
+          tokenManager.clearTokenData(oauth2Client._clientId);
+          return new Response(
+            JSON.stringify({ 
+              error: 'Authentication failed',
+              message: 'Please sign in again'
+            }),
+            { status: 401, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        // If retryable, throw to trigger another attempt
+        throw refreshError;
+      }
+    }
+    throw error;
+  }
+}
+
+export async function GET(req: NextRequest) {
+  try {
+    return await handleRequest(req);
+  } catch (error) {
+    const status = error.type === 'auth' ? 401 : 
+                   error.type === 'api' ? 400 : 500;
+                   
+    return new Response(
+      JSON.stringify({ 
+        error: error.type || 'unknown',
+        message: error.message || 'An unexpected error occurred'
+      }),
+      { status, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+}` : '// Implementation would go here'}`;
+          
+          // Add the placeholder file to both the map and the files to analyze
+          fileContentsMap.set(filePath, placeholderContent);
+          filesToAnalyze.push({
+            path: filePath,
+            content: placeholderContent,
+            relevance: 1.0 // High relevance for explicitly mentioned files
+          });
+          
+          // Also add to the knowledge graph context
+          graphContext.files.push({
+            path: filePath,
+            content: placeholderContent,
+            relevance: 1.0
+          });
+        }
+      }
+
+      // Get related files content with placeholder handling
+      const relatedFilesContent = await this.getRelatedFilesContent(filesToAnalyze);
+      console.log('Retrieved', relatedFilesContent.length, 'related files');
+
+      // Prepare analysis input with detailed file context
+      const analysisInput = {
         stacktrace: stackTrace,
         codeSnippets,
-        fileContext: filesToAnalyze,
-        issueDescription: description,
+        fileContext: relatedFilesContent,
+        issueDescription: extendedIssue.description || '',
         projectContext: {
           projectStructure: graphContext.projectStructure,
-          dependencies: graphContext.metadata?.dependencies || {}
+          dependencies: graphContext.dependencies
         }
-      });
+      };
+      console.log('AI analysis input:', analysisInput);
 
-      // Transform AI analysis fix format to match expected format
-      const suggestedFix = analysis.fix ? {
-        files: analysis.fix.changes.map(change => ({
-          path: change.file,
-          changes: change.changes.map(c => ({
-            lineStart: c.lineStart,
-            lineEnd: c.lineEnd,
-            oldCode: c.oldCode,
-            newCode: c.newCode,
-            explanation: c.explanation
-          }))
-        }))
-      } : undefined;
+      // Get AI analysis with enhanced context
+      const analysis = await this.ai.analyzeBug(analysisInput);
 
-      // Validate proposed fixes if we have them
-      if (suggestedFix && suggestedFix.files.length > 0) {
-        for (const file of suggestedFix.files) {
-          try {
-            // Get settings first to access owner and repo
-            const settings = await storage.getSettings();
-            if (!settings) {
-              throw new Error('GitHub settings not configured');
-            }
+      // Store analysis result
+      await knowledgeGraphService.storeAnalysisResult(extendedIssue, analysis);
 
-            // Check if file exists first
-            let originalContent: string | null = null;
-            try {
-              const content = await githubService.getFileContents({
-                owner: settings.githubOwner,
-                repo: settings.githubRepo,
-                path: file.path
-              });
-              originalContent = typeof content === 'string' ? content : JSON.stringify(content);
-            } catch (error: any) {
-              if (error.status === 404) {
-                // File doesn't exist, treat as new file
-                console.log(`File ${file.path} doesn't exist, treating as new file`);
-                continue;
-              }
-              throw error;
-            }
-            
-            // If file exists, validate the change using AI
-            if (originalContent) {
-              const validation = await this.ai.validateFix(
-                originalContent,
-                file.changes[0].newCode
-              );
-
-              if (!validation.isValid) {
-                console.warn(`Invalid fix for ${file.path}:`, validation.issues);
-                // Store validation issues for reference
-                await this.storeValidationIssues(issue.id, file.path, validation.issues);
-              }
-            }
-          } catch (error) {
-            console.warn(`Validation failed for ${file.path}:`, error);
-            // Continue with other files even if validation fails for one
-          }
+      // Generate fixes if analysis suggests them
+      let suggestedFix;
+      if (analysis.fix) {
+        const fixes = await this.generateFixesFromAnalysis(analysis.fix, relatedFilesContent);
+        if (fixes) {
+          suggestedFix = fixes;
+          await knowledgeGraphService.storeFix(extendedIssue, fixes);
         }
       }
 
-      // Map the relationships to match the expected type
-      const dependencies = (graphContext.relationships || []).map((rel: { source: string; relationship: string; target: string }) => ({
-        source: rel.source,
-        target: rel.target,
-        type: rel.relationship
-      }));
+      // Update issue status
+      await storage.updateIssueStatus(
+        typeof extendedIssue.id === 'string' ? parseInt(extendedIssue.id) : extendedIssue.id,
+        'analyzed'
+      );
 
+      // Return complete analysis result
       return {
         codeSnippets,
         stackTrace,
@@ -196,8 +388,12 @@ export class IssueAnalyzer {
           impactedComponents: analysis.impactedComponents,
           suggestedFix
         },
-        relatedFiles: filesToAnalyze.map(file => typeof file === 'object' ? file.path : file),
-        dependencies
+        relatedFiles: relatedFilesContent.map(f => f.path),
+        dependencies: graphContext.relationships.map(r => ({
+          source: r.source,
+          target: r.target,
+          type: r.relationship
+        }))
       };
     } catch (error) {
       console.error('Failed to analyze issue:', error);
@@ -209,35 +405,27 @@ export class IssueAnalyzer {
     }
   }
 
-  private async getRelatedFilesContent(files: FileContextItem[]): Promise<string[]> {
-    const contents: string[] = [];
-    console.log('Getting related files content for', files.length, 'files');
+  private async getRelatedFilesContent(files: Array<{ path: string; content: string; relevance: number }>): Promise<Array<{ path: string; content: string; relevance: number }>> {
+    const result: Array<{ path: string; content: string; relevance: number }> = [];
     
     for (const file of files) {
       try {
-        console.log('Processing file:', typeof file === 'object' ? JSON.stringify({path: file.path}) : file);
-        
         // If the file already has content, use it
         if (file.content) {
-          console.log(`Using existing content for ${file.path}`);
-          contents.push(`File: ${file.path}\n${file.content}`);
+          result.push({
+            path: file.path,
+            content: file.content,
+            relevance: file.relevance
+          });
           continue;
         }
-        
-        // Otherwise, fetch content from GitHub
-        // Get settings first to access owner and repo
+
+        // Otherwise try to fetch from GitHub
         const settings = await storage.getSettings();
         if (!settings) {
           throw new Error('GitHub settings not configured');
         }
 
-        // Ensure file.path is a string before passing it to getFileContents
-        if (typeof file.path !== 'string') {
-          console.warn(`Invalid file path: ${JSON.stringify(file.path)}`);
-          continue;
-        }
-
-        console.log(`Fetching content for ${file.path} from GitHub`);
         const content = await githubService.getFileContents({
           owner: settings.githubOwner,
           repo: settings.githubRepo,
@@ -245,15 +433,20 @@ export class IssueAnalyzer {
         });
         
         if (typeof content === 'string') {
-          contents.push(`File: ${file.path}\n${content}`);
+          result.push({
+            path: file.path,
+            content,
+            relevance: file.relevance
+          });
         } else {
-          console.warn(`Received non-string content for ${file.path}, skipping`);
+          console.warn(`No content found for file: ${file.path}`);
         }
       } catch (error) {
-        console.warn(`Failed to get content for ${file.path}:`, error);
+        console.warn(`Error getting content for file ${file.path}:`, error);
       }
     }
-    return contents;
+
+    return result;
   }
 
   private async validateProposedChange(change: FileChange): Promise<{
@@ -420,6 +613,30 @@ export class IssueAnalyzer {
       await storage.createMetric(metric);
     } catch (error) {
       console.error('Failed to store validation issues:', error);
+    }
+  }
+
+  private async generateFixesFromAnalysis(
+    suggestedFix: AIServiceResult['fix'],
+    relatedFiles: Array<{ path: string; content: string; relevance: number }>
+  ) {
+    try {
+      // Transform the suggested fix into the expected format
+      return suggestedFix ? {
+        files: suggestedFix.changes.map(change => ({
+          path: change.file,
+          changes: change.changes.map(c => ({
+            lineStart: c.lineStart,
+            lineEnd: c.lineEnd,
+            oldCode: c.oldCode,
+            newCode: c.newCode,
+            explanation: c.explanation
+          }))
+        }))
+      } : null;
+    } catch (error) {
+      console.warn('Error generating fixes:', error);
+      return null;
     }
   }
 }

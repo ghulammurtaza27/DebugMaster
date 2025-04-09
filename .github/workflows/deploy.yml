@@ -1,15 +1,13 @@
 name: Deploy and Run Debug Service
 
 on:
-  push:
-    branches: [ main ]
-  schedule:
-    - cron: '*/30 * * * *'  # Run every 30 minutes
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    # Keep the deploy job, but it will only run manually now
+    # if: github.event_name == 'push' # This condition is no longer needed
     
     steps:
     - uses: actions/checkout@v4
@@ -22,6 +20,7 @@ jobs:
 
   analyze:
     runs-on: ubuntu-latest
+    # This job will also only run manually now
     
     steps:
     - uses: actions/checkout@v4

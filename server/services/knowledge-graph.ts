@@ -622,126 +622,94 @@ class KnowledgeGraphService {
     };
 
     try {
-      // 1. Extract files from stack trace with more detail and validation
+      // 1. Extract files from stack trace
       const stackTraceFiles = this.extractFilesFromStacktrace(issue.stacktrace || '');
       console.log(`Extracted ${stackTraceFiles.length} files from stack trace`);
       
-      // 2. Get files from issue description using AI with improved prompt and validation
+      // 2. Get files from issue description using AI
       const mentionedFiles = await this.ai.extractRelevantFiles(
         `${issue.title}\n${issue.description || ''}\n${issue.context?.codeSnippets?.join('\n') || ''}`
-      ).catch(error => {
-        console.warn('Failed to extract files from issue description:', error);
-        return [];
-      });
+      );
       console.log(`Extracted ${mentionedFiles.length} files from issue description`);
-      
-      // 3. Get package.json and configuration files with validation
-      const configFiles = await this.getConfigurationFiles().catch(error => {
-        console.warn('Failed to get configuration files:', error);
-        return [];
-      });
+
+      // 3. Query Neo4j for related files based on dependencies and relationships
+      const relatedFiles = await this.findRelatedFilesFromGraph(
+        [...stackTraceFiles, ...mentionedFiles].map(f => f.path)
+      );
+      console.log(`Found ${relatedFiles.length} related files from knowledge graph`);
+
+      // 4. Get configuration files that might be relevant
+      const configFiles = await this.getConfigurationFiles();
       console.log(`Found ${configFiles.length} configuration files`);
-      
-      // 4. Get all related files with smart prioritization and deduplication
-      const allFiles = new Set([
-        ...stackTraceFiles.map(f => f.path),
-        ...mentionedFiles.map(f => f.path),
-        ...configFiles.map(f => f.path)
-      ]);
-      console.log(`Total unique files to process: ${allFiles.size}`);
 
-      // 5. Build dependency graph with error handling
-      let dependencies: Map<string, string[]> = new Map();
-      let dependents: Map<string, string[]> = new Map();
-      try {
-        const graph = await this.buildDependencyGraph(Array.from(allFiles));
-        dependencies = graph.dependencies;
-        dependents = graph.dependents;
-      } catch (error) {
-        console.warn('Failed to build dependency graph:', error);
+      // 5. Combine all unique files with proper relevance scoring
+      const allFiles = new Map<string, { path: string; content: string; relevance: number }>();
+      
+      // Add files with prioritized relevance scores
+      for (const file of stackTraceFiles) {
+        allFiles.set(file.path, { path: file.path, content: '', relevance: 1.0 });
       }
       
-      // 6. Get component hierarchy with error handling
-      let componentHierarchy = {};
-      try {
-        componentHierarchy = await this.buildComponentHierarchy(Array.from(allFiles));
-      } catch (error) {
-        console.warn('Failed to build component hierarchy:', error);
+      for (const file of mentionedFiles) {
+        if (!allFiles.has(file.path)) {
+          allFiles.set(file.path, { path: file.path, content: '', relevance: 0.9 });
+        }
       }
-
-      // 7. Smart content extraction with priority and validation
-      const processedFiles = new Set<string>();
-      for (const file of Array.from(allFiles)) {
-        if (processedFiles.has(file)) continue;
-        processedFiles.add(file);
-
-        try {
-          const content = await this.readFileContent(file);
-          if (!content) {
-            console.warn(`No content found for file: ${file}`);
-            continue;
-          }
-
-          const relevanceScore = this.calculateFileRelevance(file, {
-            isStackTrace: stackTraceFiles.some(f => f.path === file),
-            isMentioned: mentionedFiles.some(f => f.path === file),
-            isConfig: configFiles.some(f => f.path === file),
-            dependencyCount: dependencies.get(file)?.length || 0,
-            dependentCount: dependents.get(file)?.length || 0
-          });
-
-          const chunks = this.smartChunkContent(content, {
-            maxChunks: relevanceScore > 0.8 ? 3 : 1,
-            preferredSize: 1000
-          });
-
-          context.files.push(...chunks.map(chunk => ({
-            path: file,
-            content: chunk,
-            relevance: relevanceScore
-          })));
-        } catch (error) {
-          console.warn(`Failed to process file ${file}:`, error);
+      
+      for (const file of relatedFiles) {
+        if (!allFiles.has(file.path)) {
+          allFiles.set(file.path, { ...file, relevance: 0.8 });
+        }
+      }
+      
+      for (const file of configFiles) {
+        if (!allFiles.has(file.path)) {
+          allFiles.set(file.path, { ...file, relevance: 0.6 });
         }
       }
 
-      // 8. Add test coverage information with error handling
-      let testContext: { coverage: Record<string, unknown>; files: Array<{ path: string; content: string; relevance: number }> } = { coverage: {}, files: [] };
-      try {
-        testContext = await this.buildTestContext(Array.from(allFiles));
-      } catch (error) {
-        console.warn('Failed to build test context:', error);
+      // 6. Fetch content for files that don't have it
+      for (const [path, file] of allFiles) {
+        if (!file.content) {
+          try {
+            const content = await this.readFileContent(path);
+            if (content) {
+              file.content = content;
+            } else {
+              console.warn(`No content found for file: ${path}`);
+              allFiles.delete(path);
+            }
+          } catch (error) {
+            console.warn(`Error getting content for file ${path}:`, error);
+            allFiles.delete(path);
+          }
+        }
       }
-      
-      // 9. Add project structure context
-      const depsRecord = Object.fromEntries(dependencies) as Record<string, string[]>;
-      const dependentsRecord = Object.fromEntries(dependents) as Record<string, string[]>;
 
-      const projectStructure = {
-        hierarchy: componentHierarchy,
-        dependencies: depsRecord,
-        dependents: dependentsRecord,
+      // 7. Build dependency graph and component hierarchy
+      const files = Array.from(allFiles.values());
+      const graph = await this.buildDependencyGraph(files.map(f => f.path));
+      const hierarchy = await this.buildComponentHierarchy(files.map(f => f.path));
+
+      // 8. Get test coverage information
+      const testContext = await this.buildTestContext(files.map(f => f.path));
+
+      // 9. Update context with all gathered information
+      context.files = files;
+      context.projectStructure = {
+        hierarchy,
+        dependencies: Object.fromEntries(graph.dependencies),
+        dependents: Object.fromEntries(graph.dependents),
         testCoverage: testContext.coverage
       };
 
-      context.projectStructure = projectStructure;
-
-      // 10. Add package dependencies with error handling
-      let packageInfo = {
-        dependencies: {},
-        devDependencies: {},
-        peerDependencies: {}
-      };
-      try {
-        packageInfo = await this.getPackageDependencies();
-      } catch (error) {
-        console.warn('Failed to get package dependencies:', error);
-      }
+      // 10. Get package dependencies
+      const packageInfo = await this.getPackageDependencies();
       context.dependencies = packageInfo;
 
       // Store metadata about the context
       context.metadata = {
-        totalFiles: allFiles.size,
+        totalFiles: files.length,
         stackTraceFiles: stackTraceFiles.length,
         mentionedFiles: mentionedFiles.length,
         testFiles: testContext.files.length,
@@ -752,12 +720,6 @@ class KnowledgeGraphService {
         labels: issue.context?.labels || [],
         githubMetadata: issue.context?.githubMetadata || null
       };
-      
-      // If no files were found, add some default context
-      if (context.files.length === 0) {
-        console.log('No files found, adding default context');
-        context.files.push(...this.buildDefaultContext(issue));
-      }
 
       console.log('Context building completed successfully', {
         totalFiles: context.files.length,
@@ -1775,6 +1737,36 @@ class KnowledgeGraphService {
       }
     };
   }
+
+  private async findRelatedFilesFromGraph(filePaths: string[]): Promise<Array<{ path: string; content: string; relevance: number }>> {
+    if (!this.isNeo4jAvailable || !this.driver) {
+      console.log('Neo4j not available, returning empty related files');
+      return [];
+    }
+
+    const session = this.driver.session();
+    try {
+      const result = await session.run(`
+        MATCH (f:File)
+        WHERE f.path IN $filePaths
+        MATCH (f)-[r:IMPORTS|CONTAINS|CALLS]-(related:File)
+        RETURN DISTINCT related.path as path, related.content as content
+        LIMIT 50
+      `, { filePaths });
+
+      return result.records.map(record => ({
+        path: record.get('path'),
+        content: record.get('content') || '',
+        relevance: 0.8
+      }));
+    } catch (error) {
+      console.error('Error finding related files:', error);
+      return [];
+    } finally {
+      await session.close();
+    }
+  }
+
 }
-// Single export of the service instance
+
 export const knowledgeGraphService = new KnowledgeGraphService(storage);
